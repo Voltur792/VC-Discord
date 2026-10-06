@@ -19,7 +19,7 @@ export interface Settings {
   ttsPython: string; supertonicModelPath: string; supertonicVoice: string; supertonicSpeed: number;
   ttsBaseUrl: string; ttsApiKey: string; ttsModel: string; ttsVoice: string;
   musicVolume: number; musicFFmpeg: string;
-  moderationEnabled: boolean; moderatorUserIds: string[];
+  moderationEnabled: boolean; confirmModeration: boolean; moderatorUserIds: string[];
   moderationUserAliases: string; moderationChannelAliases: string;
 }
 export const defaults: Settings = {
@@ -37,7 +37,7 @@ export const defaults: Settings = {
   ttsPython: "python", supertonicModelPath: "", supertonicVoice: "F4", supertonicSpeed: 1.1,
   ttsBaseUrl: "https://api.openai.com/v1", ttsApiKey: "", ttsModel: "tts-1", ttsVoice: "alloy",
   musicVolume: 50, musicFFmpeg: "",
-  moderationEnabled: false, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
+  moderationEnabled: false, confirmModeration: true, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
 };
 const secrets = ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "googleApiKey"] as const;
 export const dataDir = process.env.DVOICE_DATA_DIR || join(process.env.APPDATA || join(homedir(), ".config"), "discord-voice-bridge");

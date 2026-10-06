@@ -7,7 +7,7 @@ export interface VoicePerson { id: string; name: string; username: string; numbe
 export interface VoiceRoom { id: string; name: string; number: number }
 interface Pending {
   speaker: Speaker; action: ModerationAction; people: VoicePerson[];
-  destination?: VoiceRoom; expiresAt: number;
+  destination?: VoiceRoom; expiresAt: number; needsSelection: boolean;
 }
 export const actionNames: Record<ModerationAction, string> = {
   mute: "выключить микрофон на сервере", unmute: "снять серверный мут микрофона",
@@ -48,9 +48,9 @@ export class VoiceModeration {
   private pending = new Map<string, Pending>();
   constructor(private settings: () => Settings, private transport: VoiceTransport, private saving: () => boolean, private note: (text: string, error?: boolean) => void) {}
   clear(): void { this.pending.clear(); }
-  state(): { pending: { userId: string; action: string; people: { id: string; name: string; number: number }[]; destination: string; expiresAt: number }[]; rooms: VoiceRoom[]; permissions: Record<string, boolean> } {
+  state(): { confirmationRequired: boolean; pending: { userId: string; action: string; people: { id: string; name: string; number: number }[]; destination: string; expiresAt: number; needsSelection: boolean }[]; rooms: VoiceRoom[]; permissions: Record<string, boolean> } {
     this.prune();
-    return { pending: [...this.pending.values()].map(p => ({ userId: p.speaker.userId, action: actionNames[p.action], people: p.people.map(({ id, name, number }) => ({ id, name, number })), destination: p.destination?.name || "", expiresAt: p.expiresAt })), rooms: this.transport.moderationRooms(), permissions: this.transport.moderationPermissions() };
+    return { confirmationRequired: this.settings().confirmModeration, pending: [...this.pending.values()].map(p => ({ userId: p.speaker.userId, action: actionNames[p.action], people: p.people.map(({ id, name, number }) => ({ id, name, number })), destination: p.destination?.name || "", expiresAt: p.expiresAt, needsSelection: p.needsSelection })), rooms: this.transport.moderationRooms(), permissions: this.transport.moderationPermissions() };
   }
   private allowed(speaker: Speaker): boolean {
     const s = this.settings();
@@ -58,6 +58,14 @@ export class VoiceModeration {
   }
   private prune(): void {
     for (const [id, request] of this.pending) if (request.expiresAt <= Date.now() || !this.allowed(request.speaker)) this.pending.delete(id);
+  }
+  private async execute(speaker: Speaker, action: ModerationAction, person: VoicePerson, destination: VoiceRoom | undefined, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted();
+    try { await this.transport.moderate(action, person, destination, () => !signal.aborted && this.allowed(speaker)); }
+    catch (error) { const message = safeError(error, this.settings()); this.note(message, true); return message; }
+    const done = `${actionNames[action]} — ${personLabel(person)}${destination ? `, канал ${destination.number}: ${destination.name}` : ""}`;
+    this.note(`Управление участником выполнено: ${done}.`);
+    return `Готово: ${done}.`;
   }
   async voice(speaker: Speaker, text: string, signal: AbortSignal): Promise<string | undefined> {
     const addressed = removePrefix(text, this.settings().wakeWord);
@@ -94,18 +102,17 @@ export class VoiceModeration {
       const selected = request.people.find(person => person.number === number((confirm || choose)![1]));
       if (!selected) return "Этот номер не относится к ожидающей команде. Назовите номер из предложенного списка или отмените команду.";
       if (choose) {
-        request.people = [selected]; request.expiresAt = Date.now() + 60_000;
+        if (!this.settings().confirmModeration) {
+          this.pending.delete(speaker.userId);
+          return this.execute(request.speaker, request.action, selected, request.destination, signal);
+        }
+        request.people = [selected]; request.needsSelection = false; request.expiresAt = Date.now() + 60_000;
         return `Выбран ${personLabel(selected)}. Действие: ${actionNames[request.action]}${request.destination ? ` в канал ${request.destination.number}: ${request.destination.name}` : ""}. Для выполнения скажите: ${this.settings().wakeWord}, подтверди участника ${selected.number}.`;
       }
-      if (request.people.length !== 1) return `Сначала выберите человека: ${this.settings().wakeWord}, выбери участника ${selected.number}. Я повторю имя и действие, затем попрошу подтверждение.`;
+      if (request.needsSelection) return `Сначала выберите человека: ${this.settings().wakeWord}, выбери участника ${selected.number}.`;
       // Consume before the API call: repeating a confirmation cannot repeat a mutation.
       this.pending.delete(speaker.userId);
-      const destination = request.destination;
-      try { await this.transport.moderate(request.action, selected, destination, () => !signal.aborted && this.allowed(request.speaker)); }
-      catch (error) { const message = safeError(error, this.settings()); this.note(message, true); return message; }
-      const done = `${actionNames[request.action]} — ${personLabel(selected)}${destination ? `, канал ${destination.number}: ${destination.name}` : ""}`;
-      this.note(`Управление участником выполнено: ${done}.`);
-      return `Готово: ${done}.`;
+      return this.execute(request.speaker, request.action, selected, request.destination, signal);
     }
     if (!command) return;
     this.pending.delete(speaker.userId);
@@ -123,11 +130,12 @@ export class VoiceModeration {
     const resolved = target === "меня" ? available.filter(person => person.id === speaker.userId) : matches(available, target, "участник", this.settings().moderationUserAliases);
     const people = resolved.length ? resolved : available;
     if (!people.length) return "В канале нет доступных участников.";
+    if (resolved.length === 1 && !this.settings().confirmModeration) return this.execute(speaker, command.action, resolved[0], destination, signal);
     if (this.pending.size >= 8) return "Слишком много ожидающих команд. Повторите через минуту.";
-    this.pending.set(speaker.userId, { speaker: { ...speaker }, action: command.action, people: people.map(p => ({ ...p })), destination: destination ? { ...destination } : undefined, expiresAt: Date.now() + 60_000 });
+    this.pending.set(speaker.userId, { speaker: { ...speaker }, action: command.action, people: people.map(p => ({ ...p })), destination: destination ? { ...destination } : undefined, expiresAt: Date.now() + 60_000, needsSelection: resolved.length !== 1 });
     const action = actionNames[command.action] + (destination ? ` в канал ${destination.number}: ${destination.name}` : "");
     const choices = people.slice(0, 8).map(personLabel).join(". ");
-    const confirmation = people.length === 1 ? `подтверди участника ${people[0].number}` : "выбери участника и нужный номер, например выбери участника " + people[0].number;
+    const confirmation = resolved.length === 1 ? `подтверди участника ${people[0].number}` : "выбери участника и нужный номер, например выбери участника " + people[0].number;
     return `${resolved.length === 1 ? "Найден" : resolved.length ? "Имя неоднозначно, выберите участника" : "Имя не совпало, выберите участника"}: ${choices}. Действие: ${action}. ${people.length > 8 ? "Полный список во вкладке Участники. " : ""}Для выполнения в течение минуты скажите: ${this.settings().wakeWord}, ${confirmation}. Или: ${this.settings().wakeWord}, отмени команду.`;
   }
 }

@@ -208,7 +208,7 @@ function renderModeration(state) {
   }
   const names = { move: "Перенос", mute: "Мут микрофона", deaf: "Отключение звука", kick: "Кик с сервера" };
   $("moderationPermissions").textContent = state.connected ? Object.entries(names).map(([key, name]) => name + ": " + (data.permissions?.[key] ? "право есть" : "нет права")).join(" · ") + ". Права назначения и роль участника проверяются перед действием." : "Права будут показаны после подключения.";
-  $("moderationPending").textContent = (data.pending || []).map(p => "Аккаунт " + p.userId + ": " + p.action + (p.destination ? " → " + p.destination : "") + "; " + p.people.map(person => "№ " + person.number + " · " + person.name).join(", ") + ". " + (p.people.length === 1 ? "Подтвердите номер голосом" : "Скажите «выбери участника» и нужный номер, затем подтвердите") + " до " + new Date(p.expiresAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + ".").join("\n") || "Нет ожидающих команд.";
+  $("moderationPending").textContent = (data.pending || []).map(p => "Аккаунт " + p.userId + ": " + p.action + (p.destination ? " → " + p.destination : "") + "; " + p.people.map(person => "№ " + person.number + " · " + person.name).join(", ") + ". " + (p.needsSelection ? "Скажите «выбери участника» и нужный номер" + (data.confirmationRequired ? ", затем подтвердите" : " — действие выполнится сразу") : "Подтвердите номер голосом") + " до " + new Date(p.expiresAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + ".").join("\n") || "Нет ожидающих команд.";
 }
 $("copyModerators").onclick = () => { $("moderatorUserIds").value = $("allowedUserIds").value; markDirty(); };
 async function refresh() {
