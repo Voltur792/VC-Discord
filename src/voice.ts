@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits, ChannelType, PermissionFlagsBits } from "discord.js";
+import { Client, Events, GatewayIntentBits, ChannelType, PermissionFlagsBits, ActivityType } from "discord.js";
 import { AudioPlayerStatus, VoiceConnectionStatus, NoSubscriberBehavior, EndBehaviorType, StreamType, createAudioPlayer, createAudioResource, entersState, joinVoiceChannel, type VoiceConnection, type AudioReceiveStream } from "@discordjs/voice";
 import type { Readable } from "node:stream";
 import type { Settings } from "./config";
@@ -18,6 +18,10 @@ export class VoiceTransport {
   private captures = new Map<string, { cancel: () => void }>();
   private membershipVersions = new Map<string, number>();
   private connecting = false;
+  private activity = "";
+  private activityAt = 0;
+  private activityTimer?: NodeJS.Timeout;
+  private pendingActivity?: { name: string; type: ActivityType.Listening | ActivityType.Watching };
   botName = "";
   channelName = "";
   constructor(private getSettings: () => Settings, private onAudio: (speaker: Speaker, pcm: Buffer) => void, private onState: (message: string, error?: boolean) => void, private onInterruption: () => void, private onInvalidate: () => void) {
@@ -85,6 +89,7 @@ export class VoiceTransport {
       });
       await entersState(connection, VoiceConnectionStatus.Ready, 25_000);
       if (this.connection !== connection) throw new Error("Подключение отменено.");
+      this.musicPresence();
       this.onState("Бот слушает канал.");
     } catch (error) {
       if (this.client === client) this.disconnect();
@@ -171,7 +176,27 @@ export class VoiceTransport {
   pauseMusic(paused: boolean): void { this.mixer?.pauseMusic(paused); }
   musicVolume(volume: number): void { if (this.mixer) this.mixer.volume = volume / 100; }
   musicStats(): unknown { return this.mixer?.stats() || { frames: 0, underruns: 0 }; }
-  stopMusic(): void { this.mixer?.setMusic(); }
+  musicPresence(title = "", artist = "", service = "", paused = false): void {
+    if (!this.client?.isReady()) return;
+    const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+    const label = title ? `${paused ? "Пауза • " : ""}${service === "vk" ? "VK" : "Яндекс Музыка"} • ${clean(artist) ? clean(artist) + " — " : ""}${clean(title)}` : "Голосовой канал • Astra";
+    const name = [...label].slice(0, 128).join("");
+    this.pendingActivity = { name, type: title && !paused ? ActivityType.Listening : ActivityType.Watching };
+    if (this.activityTimer) return;
+    const update = () => {
+      this.activityTimer = undefined;
+      const pending = this.pendingActivity; this.pendingActivity = undefined;
+      if (!pending || !this.client?.isReady() || pending.name === this.activity) return;
+      this.activityAt = Date.now();
+      try { this.client.user.setActivity(pending.name, { type: pending.type }); this.activity = pending.name; }
+      catch { this.onState("Не удалось обновить статус песни в Discord."); }
+    };
+    // Coalesce stop/start and rapid skips within Discord's presence rate limit.
+    const delay = Math.max(0, 5000 - (Date.now() - this.activityAt));
+    if (delay) { this.activityTimer = setTimeout(update, delay); this.activityTimer.unref(); }
+    else update();
+  }
+  stopMusic(): void { this.mixer?.setMusic(); this.musicPresence(); }
   stopPlayback(): void {
     if (this.mixer && !this.mixer.destroyed) { this.mixer.stopSpeech(); return; }
     this.player.stop(true); this.audio?.destroy(); this.audio = undefined;
@@ -182,6 +207,9 @@ export class VoiceTransport {
     const connection = this.connection; this.connection = undefined;
     if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) connection.destroy();
     const client = this.client; this.client = undefined; client?.destroy();
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = undefined; this.pendingActivity = undefined; this.activityAt = 0;
+    this.activity = "";
     this.membershipVersions.clear();
     this.guildId = ""; this.channelId = ""; this.channelName = ""; this.botName = "";
   }

@@ -1,6 +1,6 @@
 {
   "name": "discord-voice-bridge",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Voice conversations in Discord with account-based access to Astra PC commands",
   "main": "dist/index.js",
   "scripts": {

@@ -106,6 +106,7 @@ export class DiscordMusic {
     if (paused) this.pauseStartedAt = Date.now();
     else { this.pauseMillis += Math.max(0, Date.now() - this.pauseStartedAt); this.pauseStartedAt = 0; }
     this.paused = paused; this.transport.pauseMusic(paused);
+    if (this.following) this.transport.musicPresence(this.title, this.artist, this.service, paused);
   }
   pause(): { ok: true } { this.setPaused(!this.paused); return { ok: true }; }
   volume(value: unknown): { ok: true; volumeRevision: number } {
@@ -217,8 +218,10 @@ export class DiscordMusic {
       const track = await musicCall("discord_state", { session: this.session }, this.controller?.signal);
       if (epoch !== this.epoch || !this.following || this.transitioning && !transition) return;
       this.bridgeVersion = Number(track.bridge_version) || 0;
+      if (this.revision < 0 && this.bridgeVersion < 3) this.note("Для полной загрузки музыкального потока обновите Astra Music до версии 1.1.6 или новее и перезапустите оба плагина.");
       if (!this.transport.connected) { this.stop(); return; }
       this.title = String(track.title || ""); this.artist = String(track.artist || "");
+      this.service = track.service === "vk" ? "vk" : "yandex";
       if (!track.stream_url || ["stopped", "failed", "idle"].includes(track.status)) { this.stop(); return; }
       if (track.revision !== this.revision) {
         const url = new URL(track.stream_url);
@@ -253,7 +256,9 @@ export class DiscordMusic {
           completed = true;
           const decodedSeconds = decodedBytes / 192000;
           const short = expectedSeconds > 0 && decodedSeconds + Math.max(5, expectedSeconds * .03) < expectedSeconds;
-          if (!decodedBytes || short || streamInterrupted) { fail(short ? "MUSIC_EARLY_EOF" : "MUSIC_STREAM_INTERRUPTED"); return; }
+          // A transient HLS warning is not a lost song if all expected audio
+          // arrived. Unknown duration still requires an unbroken stream.
+          if (!decodedBytes || short || streamInterrupted && !expectedSeconds) { fail(short ? "MUSIC_EARLY_EOF" : "MUSIC_STREAM_INTERRUPTED"); return; }
           this.trace(`music_decoder completed decoded_seconds=${decodedSeconds.toFixed(2)} expected_seconds=${expectedSeconds.toFixed(2)}`);
           void this.next(true).catch(() => { if (epoch === this.epoch) fail("MUSIC_NEXT_FAILED"); });
         };
@@ -283,6 +288,7 @@ export class DiscordMusic {
         this.trackStartedAt = Date.now(); this.pauseMillis = 0; this.pauseStartedAt = this.paused ? Date.now() : 0;
       }
       this.transport.pauseMusic(this.paused);
+      this.transport.musicPresence(this.title, this.artist, this.service, this.paused);
     } finally { this.polling = false; finished(); }
   }
 }
