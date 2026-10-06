@@ -34,6 +34,12 @@ const native = {
     // We encode PCM directly to Opus; the optional FFmpeg converter is unused.
     builder.onResolve({ filter: /^ffmpeg-static$/ }, () => ({ path: "ffmpeg-static", namespace: "optional-ffmpeg" }));
     builder.onLoad({ filter: /.*/, namespace: "optional-ffmpeg" }, () => ({ contents: "module.exports = null;", loader: "js" }));
+    // ws and @discordjs/ws catch missing native accelerators and select their
+    // bundled JavaScript / Node.js fallbacks. Keep that path self-contained.
+    builder.onResolve({ filter: /^(bufferutil|utf-8-validate|zlib-sync)$/ }, args => ({ path: args.path, namespace: "optional-websocket-native" }));
+    builder.onLoad({ filter: /.*/, namespace: "optional-websocket-native" }, () => ({
+      contents: 'throw new Error("Optional native WebSocket acceleration is not bundled");', loader: "js",
+    }));
     builder.onResolve({ filter: /^(opusscript|@snazzah\/davey)$/ }, args => ({ path: args.path, namespace: "voice-assets" }));
     builder.onLoad({ filter: /.*/, namespace: "voice-assets" }, args => ({
       contents: `module.exports = require(require('node:path').join(__dirname, 'native', ${JSON.stringify(args.path === "opusscript" ? "opusscript/index.js" : "davey.node")}));`, loader: "js",
