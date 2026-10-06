@@ -1,0 +1,2 @@
+/** Static currentColor glyph; Astra sets the dimensions for its navigation. */
+export const tabIcon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14V11a8 8 0 0 1 16 0v3"/><rect x="2.5" y="12" width="4" height="7" rx="2"/><rect x="17.5" y="12" width="4" height="7" rx="2"/><rect x="9.5" y="8" width="5" height="9" rx="2.5"/><path d="M8 14v1a4 4 0 0 0 8 0v-1M12 19v3M9 22h6"/></svg>';

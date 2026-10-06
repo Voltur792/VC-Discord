@@ -1,0 +1,30 @@
+{
+  "name": "discord-voice-bridge",
+  "version": "1.0.0",
+  "description": "Voice conversations in Discord with account-based access to Astra PC commands",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "pretest": "node scripts/build.mjs --test",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "astra-plugin-sdk": "0.7.1",
+    "discord.js": "14.27.0",
+    "@discordjs/voice": "0.19.2",
+    "opusscript": "0.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  },
+  "license": "MIT",
+  "author": "Voltur"
+}
