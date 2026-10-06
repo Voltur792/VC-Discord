@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $archivePath = [System.IO.Path]::GetFullPath([string]$request.archive)
