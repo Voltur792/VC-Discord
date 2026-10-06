@@ -19,6 +19,8 @@ export interface Settings {
   ttsPython: string; supertonicModelPath: string; supertonicVoice: string; supertonicSpeed: number;
   ttsBaseUrl: string; ttsApiKey: string; ttsModel: string; ttsVoice: string;
   musicVolume: number; musicFFmpeg: string;
+  moderationEnabled: boolean; moderatorUserIds: string[];
+  moderationUserAliases: string; moderationChannelAliases: string;
 }
 export const defaults: Settings = {
   botToken: "", guildId: "", channelId: "", allowedUserIds: [], commandsEnabled: false,
@@ -35,6 +37,7 @@ export const defaults: Settings = {
   ttsPython: "python", supertonicModelPath: "", supertonicVoice: "F4", supertonicSpeed: 1.1,
   ttsBaseUrl: "https://api.openai.com/v1", ttsApiKey: "", ttsModel: "tts-1", ttsVoice: "alloy",
   musicVolume: 50, musicFFmpeg: "",
+  moderationEnabled: false, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
 };
 const secrets = ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "googleApiKey"] as const;
 export const dataDir = process.env.DVOICE_DATA_DIR || join(process.env.APPDATA || join(homedir(), ".config"), "discord-voice-bridge");
@@ -44,10 +47,11 @@ export function ids(value: unknown): string[] {
 }
 export function normalizeSettings(value: unknown, base: Settings = defaults): Settings {
   const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  const result = { ...base, allowedUserIds: [...base.allowedUserIds], llmProviderKeys: { ...base.llmProviderKeys } };
+  const result = { ...base, allowedUserIds: [...base.allowedUserIds], moderatorUserIds: [...base.moderatorUserIds], llmProviderKeys: { ...base.llmProviderKeys } };
   for (const key of Object.keys(defaults) as (keyof Settings)[]) {
     if (!(key in raw)) continue;
     if (key === "allowedUserIds") { result.allowedUserIds = ids(raw[key]); continue; }
+    if (key === "moderatorUserIds") { result.moderatorUserIds = ids(raw[key]); continue; }
     if (key === "llmProviderKeys") {
       const entries = raw[key];
       if (entries && typeof entries === "object" && !Array.isArray(entries)) result.llmProviderKeys = Object.fromEntries(Object.entries(entries).slice(0, 100).filter(([scope, key]) => scope.length <= 2048 && typeof key === "string" && key.length <= 8192));
@@ -70,12 +74,17 @@ export function normalizeSettings(value: unknown, base: Settings = defaults): Se
 }
 export function validateSettings(s: Settings): void {
   if (s.sttEngine === "google" && !s.googleSpeechConfirmed) throw new Error("Подтвердите отправку речи участников в Google во вкладке «Голос и модель».");
-  for (const id of [s.guildId, s.channelId, ...s.allowedUserIds].filter(Boolean)) {
+  for (const id of [s.guildId, s.channelId, ...s.allowedUserIds, ...s.moderatorUserIds].filter(Boolean)) {
     if (!/^\d{17,20}$/.test(id)) throw new Error("Discord ID должен содержать от 17 до 20 цифр. Укажите ID, а не ник.");
   }
   if (!s.commandPhrase || s.commandPhrase.length < 4) throw new Error("Укажите фразу для команд ПК, например «Астра выполни».");
   if (!s.screenDisplay || s.screenDisplay.length > 64) throw new Error("Выберите экран для передачи снимков.");
   if (s.commandsEnabled && !s.allowedUserIds.length) throw new Error("Добавьте хотя бы один разрешённый Discord ID для управления ПК.");
+  if (s.moderationEnabled && !s.moderatorUserIds.length) throw new Error("Добавьте хотя бы один Discord ID во вкладке «Участники» для модерации.");
+  for (const aliases of [s.moderationUserAliases, s.moderationChannelAliases]) {
+    const lines = aliases.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (lines.length > 100 || lines.some(line => !/^\d{17,20}\s*=\s*[^=]+$/u.test(line) || line.length > 300)) throw new Error("Голосовые имена: одна строка «Discord ID = имя, другое имя», до 100 строк и 300 символов в строке.");
+  }
   if (s.ttsEngine === "supertonic" && !/^[MF][1-5]$/.test(s.supertonicVoice)) throw new Error("Выберите голос Supertonic F1–F5 или M1–M5.");
   for (const url of [s.llmBaseUrl, s.sttBaseUrl, s.ttsBaseUrl]) apiUrl(url, "");
 }

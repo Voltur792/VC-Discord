@@ -1,7 +1,7 @@
 import type { Settings } from "./config";
 export interface Speaker { userId: string; guildId: string; channelId: string; generation: number; membershipVersion?: number }
 export type Route = { kind: "public" | "command"; text: string } | { kind: "deny" | "ignore"; text?: string };
-function removePrefix(text: string, phrase: string): string | undefined {
+export function removePrefix(text: string, phrase: string): string | undefined {
   const words = phrase.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ё/gi, "[её]")).join("[\\s,.:;!—–-]+");
   const match = text.match(new RegExp(`^\\s*${words}(?=$|[\\s,.:;!—–-])[\\s,.:;!—–-]*`, "iu"));
   return match ? text.slice(match[0].length).trim() : undefined;

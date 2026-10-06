@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>VC-Discord</title>
   <script src="http://astra-plugin.localhost/bridge/astra-bridge.js"></script>
-  <link rel="stylesheet" href="styles.css?v=19">
+  <link rel="stylesheet" href="styles.css?v=20">
 </head>
 <body>
 <main>
@@ -28,7 +28,7 @@
     </div>
   </details>
   <section id="approval" class="approval" hidden aria-labelledby="approvalTitle"><div><h2 id="approvalTitle">Подтвердить команду на ПК</h2><p id="commandSpeaker" class="muted"></p><p id="pendingCommand" class="command-text"></p><p class="muted">Подтверждение действует одну минуту и относится только к этому запросу.</p></div><div class="actions"><button id="approve" class="primary" type="button">Выполнить</button><button id="reject" type="button">Отменить</button></div></section>
-      <nav class="tabs" role="tablist" aria-label="Настройки плагина"><button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="true" tabindex="0" data-tab="connection">Подключение</button><button role="tab" id="tab-voice" aria-controls="panel-voice" aria-selected="false" tabindex="-1" data-tab="voice">Голос и модель</button><button role="tab" id="tab-screen" aria-controls="panel-screen" aria-selected="false" tabindex="-1" data-tab="screen">Экран</button><button role="tab" id="tab-access" aria-controls="panel-access" aria-selected="false" tabindex="-1" data-tab="access">Доступ к ПК</button><button role="tab" id="tab-music" aria-controls="panel-music" aria-selected="false" tabindex="-1" data-tab="music">Музыка</button></nav>
+      <nav class="tabs" role="tablist" aria-label="Настройки плагина"><button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="true" tabindex="0" data-tab="connection">Подключение</button><button role="tab" id="tab-voice" aria-controls="panel-voice" aria-selected="false" tabindex="-1" data-tab="voice">Голос и модель</button><button role="tab" id="tab-screen" aria-controls="panel-screen" aria-selected="false" tabindex="-1" data-tab="screen">Экран</button><button role="tab" id="tab-access" aria-controls="panel-access" aria-selected="false" tabindex="-1" data-tab="access">Доступ к ПК</button><button role="tab" id="tab-moderation" aria-controls="panel-moderation" aria-selected="false" tabindex="-1" data-tab="moderation">Участники</button><button role="tab" id="tab-music" aria-controls="panel-music" aria-selected="false" tabindex="-1" data-tab="music">Музыка</button></nav>
   <div class="layout">
     <section class="settings">
       <form id="settingsForm">
@@ -82,6 +82,21 @@
         <section id="panel-access" class="panel" role="tabpanel" aria-labelledby="tab-access" hidden>
           <h2>Кто управляет компьютером</h2><p class="muted">Остальные участники могут разговаривать с ботом. Доступ к ПК проверяется по ID аккаунта, независимо от ника.</p><label class="check"><input type="checkbox" id="commandsEnabled" name="commandsEnabled"><span>Разрешить команды на ПК</span></label><label for="allowedUserIds">Разрешённые Discord ID</label><textarea id="allowedUserIds" name="allowedUserIds" rows="4" inputmode="numeric" placeholder="Ваш Discord ID&#10;Ещё один доверенный ID, если нужен"></textarea><p class="help">Один ID на строку. Можно добавить участника кнопкой в списке канала.</p><label for="commandPhrase">Фраза перед командой</label><input id="commandPhrase" name="commandPhrase"><p class="help">Например: «Астра, выполни: открой браузер». Обычный разговор не запускает инструменты.</p><label class="check"><input type="checkbox" id="confirmCommands" name="confirmCommands"><span>Подтверждать каждую команду на этом ПК</span></label><p class="help">Если выключить, команды разрешённых аккаунтов передаются в Astra сразу. Astra получает доступ к своим обычным инструментам. Ответы команд показываются здесь и не озвучиваются в общем канале.</p>
         </section>
+        <section id="panel-moderation" class="panel" role="tabpanel" aria-labelledby="tab-moderation" hidden>
+          <h2>Голосовое управление участниками</h2>
+          <p class="muted">Перемещение, серверный мут микрофона и звука, отключение от голосового канала и исключение с сервера. Выбирать можно людей в канале бота; каждое действие требует голосового подтверждения номера.</p>
+          <label class="check"><input id="moderationEnabled" name="moderationEnabled" type="checkbox"><span>Разрешить управление участниками</span></label>
+          <label for="moderatorUserIds">Discord ID тех, кто может отдавать команды</label><textarea id="moderatorUserIds" name="moderatorUserIds" rows="3" inputmode="numeric" placeholder="Один доверенный Discord ID на строку"></textarea>
+          <button id="copyModerators" type="button">Взять список доступа к ПК</button><p class="help">Этот список независим от доступа к ПК. Нажатие кнопки копирует ID; проверьте их и сохраните настройки.</p>
+          <h2>Как выбрать правильного человека</h2><p class="help">Каждому участнику назначен номер, видимый справа. Скажите «Астра, замуть участника два», дождитесь ответа и скажите «Астра, подтверди участника два». Номера сохраняются до переподключения бота; подтверждение действует минуту и только для того аккаунта, который отдал команду.</p>
+          <label for="moderationUserAliases">Удобные имена участников для голоса</label><textarea id="moderationUserAliases" name="moderationUserAliases" rows="4" placeholder="Discord ID = Саша, Сашу, Саше&#10;Другой Discord ID = Дима, Диму"></textarea><p class="help">Кнопка «Голосовое имя» в списке участников добавит ID. Укажите простое русское имя и его формы через запятую. Если имя не совпало или совпадений несколько, скажите «Астра, выбери участника два», дождитесь повторения имени и действия, затем подтвердите номер. Приблизительное звучание не запускает действие.</p>
+          <label for="moderationChannelAliases">Удобные имена каналов для голоса</label><textarea id="moderationChannelAliases" name="moderationChannelAliases" rows="3" placeholder="ID голосового канала = Игровая, игры"></textarea>
+          <p class="help">Перенос: «Астра, перемести Сашу в канал три» или «Астра, перемести участника два в Игровую». Бот повторит канал назначения и попросит подтвердить номер участника.</p>
+          <div class="section-heading"><h2>Каналы для переноса</h2></div><p id="emptyModerationRooms" class="help">Подключите бота: здесь появятся доступные голосовые каналы с номерами и ID.</p><ul id="moderationRooms" class="people"></ul>
+          <h2>Права Discord</h2><p id="moderationPermissions" class="help" role="status">Права будут показаны после подключения.</p><p class="help">Выдайте роли бота Move Members, Mute Members, Deafen Members и, если нужен кик с сервера, Kick Members. Для переноса нужны View Channel, Connect и Move Members в канале назначения. Для кика роль бота должна быть выше роли участника.</p>
+          <h2>Ожидают подтверждения</h2><p id="moderationPending" class="help" role="status" aria-live="polite">Нет ожидающих команд.</p>
+          <details><summary>Примеры голосовых команд</summary><ul><li>«Астра, назови участников» / «Астра, назови каналы»</li><li>«Астра, замуть Сашу» / «Астра, размуть Сашу»</li><li>«Астра, выключи звук участника два» / «Астра, верни звук участника два»</li><li>«Астра, перемести участника два в канал три»</li><li>«Астра, отключи Сашу из канала» — отключение от голосового канала</li><li>«Астра, кикни Сашу с сервера» — исключение с сервера</li><li>«Астра, подтверди участника два» / «Астра, отмени команду»</li></ul></details>
+        </section>
         <footer class="form-footer"><span id="saveHint" class="muted">Настройки хранятся на этом ПК</span><button id="save" type="submit" class="primary">Сохранить настройки</button></footer><p id="actionFeedback" class="help" hidden></p>
       </form>
     </section>
@@ -94,6 +109,6 @@
   </div>
   <footer class="bottom-note">Бот работает, пока запущена Astra. «Использовать всё из Astra» выбирает её чат, распознавание и доступный голос; ключи провайдеров вводятся отдельно один раз.</footer>
 </main>
-  <script src="app.js?v=22"></script>
+  <script src="app.js?v=23"></script>
 </body>
 </html>

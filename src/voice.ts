@@ -5,6 +5,7 @@ import type { Settings } from "./config";
 import type { Speaker } from "./access";
 import { OpusScript, opusStream, rms } from "./audio";
 import { VoiceMixer } from "./mixer";
+import type { ModerationAction, VoicePerson, VoiceRoom } from "./moderation";
 
 export class VoiceTransport {
   private client?: Client;
@@ -17,6 +18,8 @@ export class VoiceTransport {
   private channelId = "";
   private captures = new Map<string, { cancel: () => void }>();
   private membershipVersions = new Map<string, number>();
+  private personNumbers = new Map<string, number>();
+  private roomNumbers = new Map<string, number>();
   private connecting = false;
   private activity = "";
   private activityAt = 0;
@@ -28,10 +31,69 @@ export class VoiceTransport {
     this.player.on("error", () => this.onState("Ошибка воспроизведения ответа.", true));
   }
   get connected(): boolean { return this.connection?.state.status === VoiceConnectionStatus.Ready && !!this.client?.isReady(); }
-  participants(): { id: string; name: string; allowed: boolean }[] {
+  participants(): { id: string; name: string; number: number; allowed: boolean; moderator: boolean }[] {
     const channel = this.client?.channels.cache.get(this.channelId);
     if (!channel || channel.type !== ChannelType.GuildVoice) return [];
-    return [...channel.members.values()].filter(m => !m.user.bot).map(m => ({ id: m.id, name: m.displayName, allowed: this.getSettings().allowedUserIds.includes(m.id) }));
+    return this.moderationPeople().map(m => ({ id: m.id, name: m.name, number: m.number, allowed: this.getSettings().allowedUserIds.includes(m.id), moderator: this.getSettings().moderatorUserIds.includes(m.id) }));
+  }
+  moderationPeople(): VoicePerson[] {
+    const channel = this.client?.channels.cache.get(this.channelId);
+    if (!channel || channel.type !== ChannelType.GuildVoice) return [];
+    return [...channel.members.values()].filter(m => !m.user.bot).map(m => {
+      if (!this.personNumbers.has(m.id)) this.personNumbers.set(m.id, this.personNumbers.size + 1);
+      return { id: m.id, name: m.displayName, username: m.user.username, number: this.personNumbers.get(m.id)!, membershipVersion: this.membershipVersions.get(m.id) ?? 0 };
+    }).sort((a, b) => a.number - b.number);
+  }
+  moderationRooms(): VoiceRoom[] {
+    const guild = this.client?.guilds.cache.get(this.guildId), me = guild?.members.me;
+    if (!guild || !me) return [];
+    return [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice && c.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect])).sort((a, b) => a.id.localeCompare(b.id)).map(c => {
+      if (!this.roomNumbers.has(c.id)) this.roomNumbers.set(c.id, this.roomNumbers.size + 1);
+      return { id: c.id, name: c.name, number: this.roomNumbers.get(c.id)! };
+    }).sort((a, b) => a.number - b.number);
+  }
+  moderationPermissions(): Record<string, boolean> {
+    const guild = this.client?.guilds.cache.get(this.guildId), me = guild?.members.me;
+    const channel = guild?.channels.cache.get(this.channelId), permissions = me && channel?.permissionsFor(me);
+    return { move: !!permissions?.has(PermissionFlagsBits.MoveMembers), mute: !!permissions?.has(PermissionFlagsBits.MuteMembers), deaf: !!permissions?.has(PermissionFlagsBits.DeafenMembers), kick: !!me?.permissions.has(PermissionFlagsBits.KickMembers) };
+  }
+  async moderate(action: ModerationAction, person: VoicePerson, destination: VoiceRoom | undefined, allowed: () => boolean): Promise<void> {
+    const client = this.client, guild = client?.guilds.cache.get(this.guildId), generation = this.generation;
+    const valid = () => this.client === client && generation === this.generation && this.connected && allowed();
+    if (!guild || !valid()) throw new Error("Доступ к управлению участниками отозван или соединение изменилось.");
+    try {
+      const member = await guild.members.fetch({ user: person.id, force: true });
+      const me = await guild.members.fetchMe({ force: true });
+      const source = await guild.channels.fetch(this.channelId);
+      const room = action === "move" && destination ? await guild.channels.fetch(destination.id) : undefined;
+      if (!valid()) throw new Error("Команда отменена: доступ или соединение изменились.");
+      if (member.user.bot || member.voice.channelId !== this.channelId || person.membershipVersion !== (this.membershipVersions.get(person.id) ?? 0)) throw new Error("Участник вышел или сменил канал. Повторите команду и выбор человека.");
+      if (!source || source.type !== ChannelType.GuildVoice) throw new Error("Исходный голосовой канал недоступен.");
+      const permissions = source.permissionsFor(me);
+      const reason = "VC-Discord: voice command confirmed by an allowed Discord account";
+      if (action === "kick") {
+        if (!me.permissions.has(PermissionFlagsBits.KickMembers) || !member.kickable) throw new Error("Для исключения нужны права Kick Members и роль бота выше роли участника. Владельца сервера исключить нельзя.");
+        await member.kick(reason);
+      } else if (action === "move" || action === "disconnect") {
+        if (!permissions?.has(PermissionFlagsBits.MoveMembers)) throw new Error("Выдайте боту право Move Members в исходном канале.");
+        if (action === "move") {
+          if (!room || room.type !== ChannelType.GuildVoice || !room.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.MoveMembers])) throw new Error("Для переноса боту нужны View Channel, Connect и Move Members в выбранном канале.");
+          if (room.id === this.channelId) throw new Error("Участник уже находится в этом канале.");
+          await member.voice.setChannel(room, reason);
+        } else await member.voice.disconnect(reason);
+      } else if (action === "mute" || action === "unmute") {
+        if (!permissions?.has(PermissionFlagsBits.MuteMembers)) throw new Error("Выдайте боту право Mute Members в голосовом канале.");
+        await member.voice.setMute(action === "mute", reason);
+      } else {
+        if (!permissions?.has(PermissionFlagsBits.DeafenMembers)) throw new Error("Выдайте боту право Deafen Members в голосовом канале.");
+        await member.voice.setDeaf(action === "deaf", reason);
+      }
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? Number(error.code) : NaN;
+      if (code === 50013 || code === 50001) throw new Error("Discord отказал в доступе. Проверьте права роли бота, ограничения обоих каналов и положение роли бота.");
+      if (error instanceof Error && !Number.isFinite(code) && !/^(?:DiscordAPIError|HTTPError|RateLimitError)/.test(error.name) && !/fetch|socket|connect|timeout/i.test(error.message)) throw error;
+      throw new Error("Discord не подтвердил действие. Проверьте состояние участника и соединение перед повтором команды.");
+    }
   }
   present(speaker: Speaker): boolean {
     return this.connected && speaker.generation === this.generation && (speaker.membershipVersion ?? 0) === (this.membershipVersions.get(speaker.userId) ?? 0) && speaker.guildId === this.guildId && speaker.channelId === this.channelId && this.participants().some(m => m.id === speaker.userId);
@@ -211,6 +273,7 @@ export class VoiceTransport {
     this.activityTimer = undefined; this.pendingActivity = undefined; this.activityAt = 0;
     this.activity = "";
     this.membershipVersions.clear();
+    this.personNumbers.clear(); this.roomNumbers.clear();
     this.guildId = ""; this.channelId = ""; this.channelName = ""; this.botName = "";
   }
 }

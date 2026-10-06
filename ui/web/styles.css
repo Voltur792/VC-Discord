@@ -71,6 +71,9 @@ aside { display: grid; gap: 14px; min-width: 0; }
 .person-copy span { display: block; font-size: 10px; color: var(--color-text-muted, #92929e); user-select: text; }
 .people button { font-size: 10px; padding: 4px 8px; }
 .person-allowed { font-size: 10px; color: var(--color-accent, #9eafff); }
+.people li { flex-wrap: wrap; }
+.person-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; }
+#moderationPending { white-space: pre-wrap; overflow-wrap: anywhere; }
 .transcript, .answer { font-size: 12px; margin-top: 12px; user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; }
 .answer { padding-left: 12px; border-left: 2px solid var(--color-accent, #9eafff); }
 .updates li { font-size: 11px; margin-top: 12px; color: var(--color-text-muted, #92929e); }

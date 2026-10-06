@@ -3,6 +3,7 @@
 const $ = id => document.getElementById(id);
 let snapshot, dirty = false, busy = false, polling = false, noticeError = "";
 let participantsKey = "";
+let moderationRoomsKey = "";
 const clearSecrets = new Set();
 const pickers = [];
 let modelConnections = [], currentMusic;
@@ -161,12 +162,18 @@ function render(state) {
     $("participants").replaceChildren();
     for (const person of state.participants) {
     const li = document.createElement("li"), copy = document.createElement("div"), title = document.createElement("strong"), id = document.createElement("span");
-    copy.className = "person-copy"; title.textContent = person.name; id.textContent = person.id; copy.append(title, id); li.append(copy);
+    copy.className = "person-copy"; title.textContent = "№ " + person.number + " · " + person.name; id.textContent = person.id; copy.append(title, id); li.append(copy);
     if (person.allowed) { const badge = document.createElement("span"); badge.className = "person-allowed"; badge.textContent = "Доступ к ПК"; li.append(badge); }
     else { const button = document.createElement("button"); button.type = "button"; button.textContent = "Разрешить"; button.setAttribute("aria-label", "Добавить " + person.name + " в список доступа к ПК"); button.onclick = () => { const list = $("allowedUserIds").value.split(/[\s,;]+/).filter(Boolean); if (!list.includes(person.id)) list.push(person.id); $("allowedUserIds").value = list.join("\n"); markDirty(); selectTab("access"); }; li.append(button); }
+    const buttons = document.createElement("div"); buttons.className = "person-actions";
+    const nameButton = document.createElement("button"); nameButton.type = "button"; nameButton.textContent = "Голосовое имя"; nameButton.setAttribute("aria-label", "Задать голосовое имя для " + person.name); nameButton.onclick = () => editVoiceAlias("moderationUserAliases", person.id); buttons.append(nameButton);
+    if (person.moderator) { const badge = document.createElement("span"); badge.className = "person-allowed"; badge.textContent = "Модератор"; buttons.append(badge); }
+    else { const button = document.createElement("button"); button.type = "button"; button.textContent = "Доступ к модерации"; button.setAttribute("aria-label", "Разрешить " + person.name + " управлять участниками"); button.onclick = () => { const list = $("moderatorUserIds").value.split(/[\s,;]+/).filter(Boolean); if (!list.includes(person.id)) list.push(person.id); $("moderatorUserIds").value = list.join("\n"); markDirty(); selectTab("moderation"); }; buttons.append(button); }
+    li.append(buttons);
       $("participants").append(li);
     }
   }
+  renderModeration(state);
   $("approval").hidden = !state.pending;
   if (state.pending) { $("pendingCommand").textContent = state.pending.command; $("commandSpeaker").textContent = "Аккаунт " + state.pending.userId; }
   $("commandResultSection").hidden = !state.commandResult && !state.commandBusy;
@@ -181,6 +188,29 @@ function render(state) {
   if (state.error && !noticeError) notice(state.error);
   primaryContrast();
 }
+function editVoiceAlias(field, id) {
+  const input = $(field), lines = input.value.split("\n");
+  if (!lines.some(line => line.split("=")[0].trim() === id)) { input.value = (input.value.trim() ? input.value.trim() + "\n" : "") + id + " = "; markDirty(); }
+  selectTab("moderation", false); input.focus();
+  const start = input.value.indexOf(id + " = ");
+  if (start >= 0) { const end = input.value.indexOf("\n", start); input.setSelectionRange(start + id.length + 3, end < 0 ? input.value.length : end); }
+}
+function renderModeration(state) {
+  const data = state.moderation || {}, rooms = data.rooms || [];
+  $("emptyModerationRooms").hidden = rooms.length > 0;
+  const key = JSON.stringify(rooms);
+  if (key !== moderationRoomsKey) {
+    moderationRoomsKey = key; $("moderationRooms").replaceChildren();
+    for (const room of rooms) {
+      const row = document.createElement("li"), copy = document.createElement("div"), title = document.createElement("strong"), id = document.createElement("span"), button = document.createElement("button");
+      copy.className = "person-copy"; title.textContent = "Канал " + room.number + " · " + room.name; id.textContent = room.id; copy.append(title, id); button.type = "button"; button.textContent = "Голосовое имя"; button.setAttribute("aria-label", "Задать голосовое имя канала " + room.name); button.onclick = () => editVoiceAlias("moderationChannelAliases", room.id); row.append(copy, button); $("moderationRooms").append(row);
+    }
+  }
+  const names = { move: "Перенос", mute: "Мут микрофона", deaf: "Отключение звука", kick: "Кик с сервера" };
+  $("moderationPermissions").textContent = state.connected ? Object.entries(names).map(([key, name]) => name + ": " + (data.permissions?.[key] ? "право есть" : "нет права")).join(" · ") + ". Права назначения и роль участника проверяются перед действием." : "Права будут показаны после подключения.";
+  $("moderationPending").textContent = (data.pending || []).map(p => "Аккаунт " + p.userId + ": " + p.action + (p.destination ? " → " + p.destination : "") + "; " + p.people.map(person => "№ " + person.number + " · " + person.name).join(", ") + ". " + (p.people.length === 1 ? "Подтвердите номер голосом" : "Скажите «выбери участника» и нужный номер, затем подтвердите") + " до " + new Date(p.expiresAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + ".").join("\n") || "Нет ожидающих команд.";
+}
+$("copyModerators").onclick = () => { $("moderatorUserIds").value = $("allowedUserIds").value; markDirty(); };
 async function refresh() {
   if (polling || document.hidden) return; polling = true;
   try { render(await backend("state")); }

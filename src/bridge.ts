@@ -15,6 +15,7 @@ import { DiscordMusic } from "./music";
 import { MusicSetup } from "./music-setup";
 import { Diagnostics } from "./diagnostics";
 import { WindowsServiceError } from "./process";
+import { VoiceModeration } from "./moderation";
 
 interface Job { speaker: Speaker; pcm: Buffer; createdAt: number }
 interface Pending { id: string; speaker: Speaker; command: string; expiresAt: number }
@@ -79,6 +80,7 @@ export class VoiceBridge {
   );
   private readonly gate = new CommandGate(() => this.settings, speaker => !this.configSaving && this.transport.present(speaker), text => this.nativeCommand(text));
   private readonly music = new DiscordMusic(this.transport, () => this.settings, (text, error) => this.note(text, error), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); });
+  private readonly moderation = new VoiceModeration(() => this.settings, this.transport, () => this.configSaving, (text, error) => this.note(text, error));
   musicCurrent(): Promise<unknown> { return this.music.current(); }
   musicSearch(value: unknown): unknown { return this.music.beginJob("search", value); }
   musicPlay(value: unknown): unknown { return this.music.beginJob("play", value); }
@@ -114,6 +116,7 @@ export class VoiceBridge {
       whisperSetup: { running: this.whisperSetup.running, status: this.whisperSetup.status },
       screen: { active: this.screenSharing, lastSentAt: this.lastScreenAt, ...this.browserScreen.status() },
       music: this.music.state(),
+      moderation: this.moderation.state(),
       musicSetup: { running: this.musicSetup.running, ready: this.musicSetup.ready, status: this.musicSetup.status },
       diagnostics: this.diagnostics.state(),
     };
@@ -127,6 +130,7 @@ export class VoiceBridge {
   modelConnections(): Promise<unknown> { return astraConnections().then(connections => ({ connections })); }
   errorMessage(error: unknown): string { return safeError(error, this.settings); }
   private cancelWaiting(): void {
+    this.moderation.clear();
     this.music.stop();
     this.browserScreen.stop();
     this.screenSharing = false; this.lastScreenAt = 0;
@@ -184,8 +188,8 @@ export class VoiceBridge {
   disconnect(): { ok: true } {
     this.transport.disconnect(); this.providers.stop(); this.phase = "offline"; this.status = "Бот отключён"; return { ok: true };
   }
-  stopSpeech(): { ok: true } { this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.note("Озвучка и ожидающие реплики остановлены."); return { ok: true }; }
-  clearHistory(): { ok: true } { this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.history = []; this.lastHeard = ""; this.lastAnswer = ""; this.note("История общего разговора очищена."); return { ok: true }; }
+  stopSpeech(): { ok: true } { this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.note("Озвучка и ожидающие реплики остановлены."); return { ok: true }; }
+  clearHistory(): { ok: true } { this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.history = []; this.lastHeard = ""; this.lastAnswer = ""; this.note("История общего разговора очищена."); return { ok: true }; }
   private enqueue(speaker: Speaker, pcm: Buffer): void {
     if (!this.transport.present(speaker) || this.configSaving) return;
     if (this.queue.length >= 6) { this.note("Очередь заполнена. Повторите реплику после ответа."); return; }
@@ -204,6 +208,12 @@ export class VoiceBridge {
           const text = await this.providers.transcribe(this.settings, job.pcm, controller.signal);
           if (!this.transport.present(job.speaker) || controller.signal.aborted || !text) continue;
           this.lastHeard = text;
+          const moderationReply = await this.moderation.voice(job.speaker, text, controller.signal);
+          if (moderationReply !== undefined) {
+            this.lastAnswer = moderationReply;
+            if (!controller.signal.aborted && this.transport.present(job.speaker)) await this.say(moderationReply, controller.signal);
+            continue;
+          }
           if (isDisconnectUtterance(this.settings, text)) {
             const allowed = () => !this.configSaving && this.transport.present(job.speaker) && this.settings.allowedUserIds.includes(job.speaker.userId);
             if (!allowed()) {
