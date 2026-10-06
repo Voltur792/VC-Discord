@@ -12,6 +12,7 @@ import { WhisperWorker } from "./whisper";
 import { discoverDiscord } from "./discord-setup";
 import { BrowserScreen, localVisionBase, openScreenPicker } from "./screen";
 import { DiscordMusic } from "./music";
+import { MusicSetup } from "./music-setup";
 
 interface Job { speaker: Speaker; pcm: Buffer; createdAt: number }
 interface Pending { id: string; speaker: Speaker; command: string; expiresAt: number }
@@ -28,6 +29,7 @@ export class VoiceBridge {
   private providers = new Providers();
   private setup = new LocalSetup();
   private whisperSetup = new WhisperSetup();
+  private musicSetup = new MusicSetup();
   private recognitionImport?: WhisperWorker;
   private closing = false;
   private ctx?: PluginContext;
@@ -74,6 +76,7 @@ export class VoiceBridge {
   musicPause(): unknown { return this.music.pause(); }
   musicStop(): unknown { return this.music.stop(); }
   musicVolume(value: unknown): unknown { return this.music.volume(value); }
+  setupMusic(): { ok: true } { return this.musicSetup.start(this.settings.musicFFmpeg); }
   async init(ctx: PluginContext): Promise<void> {
     this.ctx = ctx;
     this.closing = false;
@@ -99,6 +102,7 @@ export class VoiceBridge {
       whisperSetup: { running: this.whisperSetup.running, status: this.whisperSetup.status },
       screen: { active: this.screenSharing, lastSentAt: this.lastScreenAt, ...this.browserScreen.status() },
       music: this.music.state(),
+      musicSetup: { running: this.musicSetup.running, ready: this.musicSetup.ready, status: this.musicSetup.status },
     };
   }
   async stateForUi(): Promise<Record<string, unknown>> {
@@ -413,5 +417,5 @@ export class VoiceBridge {
     try { await this.say("Привет! Я Астра. Голосовое соединение с Discord работает.", controller.signal); return { ok: true }; }
     finally { if (this.controller === controller) this.controller = undefined; this.phase = this.transport.connected ? "listening" : "offline"; }
   }
-  shutdown(): void { this.closing = true; this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.disconnect(); }
+  shutdown(): void { this.closing = true; this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.musicSetup.stop(); this.disconnect(); }
 }

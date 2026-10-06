@@ -11,6 +11,8 @@ The plugin's own source is MIT, Copyright 2026 Voltur. Bundled libraries retain 
 
 Vosk is an optional separately installed runtime: https://alphacephei.com/vosk/. A small Russian model is downloaded only after a request in the local plugin UI.
 
+FFmpeg 9.0.2 is an optional separately downloaded runtime, not bundled with this plugin. The “Подготовить музыку” button reuses an existing installation or downloads the Windows x64 essentials build from https://www.gyan.dev/ffmpeg/builds/ (a binary provider linked by https://ffmpeg.org/download.html). The archive is checked against its pinned published SHA-256 before extraction or execution. Gyan's build is GPL-3.0; its original LICENSE and README.txt are kept beside the downloaded executable. FFmpeg source and build information: https://www.gyan.dev/ffmpeg/builds/ and https://ffmpeg.org/download.html.
+
 Supertonic Python SDK 1.3.1 is an optional separately installed runtime, under the MIT license: https://github.com/supertone-oss-archive/supertonic-py. Supertonic 3 model files and voice styles are reused from Astra's existing installation and are not included in this bundle. No model download is performed by the Supertonic worker.
 
 Pywhispercpp 1.5.1 (MIT, https://github.com/absadiki/pywhispercpp) and its whisper.cpp backend (MIT, https://github.com/ggml-org/whisper.cpp) are optional separately installed runtimes. The automatic preparation installs wheels in an isolated Python environment. Whisper GGML model files are reused from Astra and are not included in the bundle; this plugin does not download Whisper model files.

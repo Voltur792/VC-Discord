@@ -61,6 +61,7 @@
         </section>
         <section id="panel-music" class="panel" role="tabpanel" aria-labelledby="tab-music" hidden>
           <h2>Музыка в Discord</h2><p class="muted">Используются подключения Яндекс Музыки и VK из Astra Music. Выбранные здесь треки звучат только в голосовом канале Discord.</p>
+          <button id="setupMusic" type="button">Подготовить музыку</button><p id="musicSetupStatus" class="help" role="status" aria-live="polite">Найдёт FFmpeg на этом ПК или загрузит его для плагина, около 109 МБ. Системные настройки не меняются.</p>
           <div class="music-now"><span class="music-glyph" aria-hidden="true">♫</span><div><strong id="musicTitle">Трансляция не запущена</strong><p id="musicArtist" class="muted"></p><p id="musicStatus" class="help" role="status">Подключите бота к каналу и выберите трек.</p></div></div>
           <div class="actions"><button id="musicCurrent" type="button">Показать текущий трек Astra Music</button><button id="musicStart" class="primary" type="button">Включить этот трек в Discord</button><button id="musicPrevious" type="button" disabled>Предыдущий</button><button id="musicPause" type="button" disabled>Пауза</button><button id="musicNext" type="button" disabled>Следующий</button><button id="musicStop" type="button" disabled>Остановить музыку</button></div>
           <label for="musicVolume">Громкость музыки в Discord <output id="musicVolumeValue">5 / 10</output></label><input id="musicVolume" name="musicVolume" type="range" min="0" max="10" step="1" value="5"><p class="help">Громкость — от 0 до 10, как в Astra Music. Во время голосового ответа музыка становится тише. Очередь Discord управляется отдельно от плеера на ПК.</p>
@@ -83,6 +84,6 @@
   </div>
   <footer class="bottom-note">Бот работает, пока запущена Astra. «Использовать всё из Astra» выбирает её чат, распознавание и доступный голос; ключи провайдеров вводятся отдельно один раз.</footer>
 </main>
-<script src="app.js?v=20"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>

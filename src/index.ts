@@ -35,6 +35,7 @@ export const app = plugin({
       music_pause: call(() => bridge.musicPause()),
       music_stop: call(() => bridge.musicStop()),
       music_volume: call(value => bridge.musicVolume(value)),
+      setup_music: call(() => bridge.setupMusic()),
       save: call(value => bridge.save(value)),
       connect: call(() => bridge.connect()),
       disconnect: call(() => bridge.disconnect()),

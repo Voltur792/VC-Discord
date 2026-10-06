@@ -1,4 +1,4 @@
-import { readFile, access } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import type { Settings } from "./config";
 import { limitedBody } from "./providers";
 import type { VoiceTransport } from "./voice";
+import { findMusicFFmpeg } from "./music-setup";
 
 async function musicCall(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<any> {
   let location: { port: number; token: string };
@@ -220,12 +221,8 @@ export class DiscordMusic {
       if (track.revision !== this.revision) {
         const url = new URL(track.stream_url);
         if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.search || url.hash || !/^\/[A-Za-z0-9_-]{32,100}\/discord-stream\/\d+\/0$/.test(url.pathname)) throw new Error("Неверный адрес музыкального потока.");
-        let executable = this.settings().musicFFmpeg;
-        if (!executable) {
-          const candidates = [join(__dirname, "native", "ffmpeg.exe"), "C:\\ffmpeg\\bin\\ffmpeg.exe", ...(process.env.PATH || "").split(";").map(p => join(p, "ffmpeg.exe"))];
-          for (const path of candidates) { try { await access(path); executable = path; break; } catch {} }
-        }
-        if (!executable) throw new Error("FFmpeg не найден на этом ПК. Установите FFmpeg для воспроизведения музыки в Discord.");
+        const executable = await findMusicFFmpeg(this.settings().musicFFmpeg);
+        if (!executable) throw new Error("FFmpeg не найден. Нажмите «Подготовить музыку» во вкладке «Музыка».");
         if (epoch !== this.epoch) return;
         this.stopDecoder(); this.revision = track.revision;
         // FFmpeg can read HLS playlists, segments and AES keys only via our
