@@ -130,7 +130,7 @@ function render(state) {
   const music = state.music || {};
   $("musicTitle").textContent = music.title || currentMusic?.title || "Трансляция не запущена";
   $("musicArtist").textContent = music.artist || currentMusic?.artist || "";
-  $("musicStatus").textContent = music.error || (music.loading ? "Готовим музыку для Discord…" : music.following ? music.paused ? "Музыка в Discord на паузе" : music.playing ? "Музыка звучит в Discord · голосовые ответы остаются доступны" : "Готовим следующий трек…" : "Выберите музыку для Discord.");
+  $("musicStatus").textContent = music.error || (music.recovering ? `Поток прервался. Восстанавливаем песню с места остановки — попытка ${Math.max(1, music.recoveryAttempts || 0)} из 3…` : music.loading ? "Готовим музыку для Discord…" : music.following ? music.paused ? "Музыка в Discord на паузе" : music.playing ? "Музыка звучит в Discord · голосовые ответы остаются доступны" : "Готовим следующий трек…" : "Выберите музыку для Discord.");
   $("musicStart").disabled = busy || !state.connected;
   $("musicPause").disabled = busy || music.loading || !music.following;
   $("musicPause").textContent = music.paused ? "Продолжить" : "Пауза";

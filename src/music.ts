@@ -46,19 +46,21 @@ export class DiscordMusic {
   private selectedVolume?: number;
   private session = "";
   private loading = false;
-  private trackStartedAt = 0;
-  private pauseStartedAt = 0;
-  private pauseMillis = 0;
   private service: "yandex" | "vk" = "yandex";
   private job?: { id: string; status: string; result?: unknown; error?: string };
   private hlsOptions = new Map<string, string[]>();
   private bridgeVersion = 0;
   private transitioning = false;
+  private recovering = false;
+  private recoveryAttempts = 0;
+  private resumeSeconds = 0;
+  private expectedDuration = 0;
+  private decoderAttached = false;
   private volumeRevision = 0;
   private readonly volumeInstance = randomBytes(16).toString("hex");
   private syncFinished: Promise<void> = Promise.resolve();
   constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void, private trace: (text: string) => void = () => {}) {}
-  state(): Record<string, unknown> { return { following: this.following, loading: this.loading || this.transitioning, paused: this.paused, title: this.title, artist: this.artist, error: this.error, playing: !!this.child && !this.paused, volume: this.selectedVolume ?? this.settings().musicVolume, volumeRevision: this.volumeRevision, volumeInstance: this.volumeInstance, audio: this.transport.musicStats(), job: this.job }; }
+  state(): Record<string, unknown> { return { following: this.following, loading: this.loading || this.transitioning || this.recovering, recovering: this.recovering, recoveryAttempts: this.recoveryAttempts, paused: this.paused, title: this.title, artist: this.artist, error: this.error, playing: !!this.child && !this.paused && !this.recovering, volume: this.selectedVolume ?? this.settings().musicVolume, volumeRevision: this.volumeRevision, volumeInstance: this.volumeInstance, audio: this.transport.musicStats(), job: this.job }; }
   beginJob(method: "search" | "playlists" | "play" | "next", value: unknown = {}): unknown {
     if (method === "next" || method === "play") this.trace(`music_button action=${method}`);
     if (this.job?.status === "loading") throw new Error("Дождитесь завершения музыкального действия.");
@@ -103,8 +105,6 @@ export class DiscordMusic {
   }
   private setPaused(paused: boolean): void {
     if (paused === this.paused) return;
-    if (paused) this.pauseStartedAt = Date.now();
-    else { this.pauseMillis += Math.max(0, Date.now() - this.pauseStartedAt); this.pauseStartedAt = 0; }
     this.paused = paused; this.transport.pauseMusic(paused);
     if (this.following) this.transport.musicPresence(this.title, this.artist, this.service, paused);
   }
@@ -120,18 +120,80 @@ export class DiscordMusic {
     const session = this.session; this.session = ""; this.loading = false;
     if (session) void musicCall("discord_stop", { session }).catch(() => {});
     this.following = false; this.epoch++; this.controller?.abort(); this.controller = undefined;
+    this.recovering = false; this.recoveryAttempts = 0; this.resumeSeconds = 0; this.expectedDuration = 0;
     if (this.poll) clearInterval(this.poll); this.poll = undefined;
     this.stopDecoder(); this.transport.stopMusic(); this.revision = -1; this.title = ""; this.artist = ""; this.paused = false;
     return { ok: true };
   }
-  private stopDecoder(): void { const child = this.child; this.child = undefined; this.pcm?.destroy(); this.pcm = undefined; child?.stdout.destroy(); child?.stdin.destroy(); child?.kill(); }
+  private stopDecoder(): void { const child = this.child; this.child = undefined; this.decoderAttached = false; this.pcm?.destroy(); this.pcm = undefined; child?.stdout.destroy(); child?.stdin.destroy(); child?.kill(); }
+  private position(): number {
+    const bytes = this.decoderAttached ? Number((this.transport.musicStats() as { musicBytes?: number }).musicBytes) || 0 : 0;
+    return this.resumeSeconds + bytes / 192000;
+  }
+  private requestRecovery(child: ChildProcessWithoutNullStreams, reason: string): void {
+    if (this.child !== child || this.recovering || !this.following) return;
+    const epoch = this.epoch, signal = this.controller?.signal;
+    if (!signal || signal.aborted) return;
+    const position = this.position();
+    this.recovering = true; this.error = "";
+    this.note("Поток прервался. Восстанавливаю текущую песню с места остановки…");
+    this.trace(`music_recovery reason=${reason} position_seconds=${position.toFixed(2)} revision=${this.revision}`);
+    void (async () => {
+      let restored = false;
+      try {
+        await this.syncFinished;
+        if (epoch !== this.epoch || signal.aborted) return;
+        this.stopDecoder(); this.transport.stopMusic(); this.resumeSeconds = position;
+        while (this.recoveryAttempts < 3 && epoch === this.epoch && !signal.aborted) {
+          this.recoveryAttempts++;
+          this.trace(`music_recovery attempt=${this.recoveryAttempts} position_seconds=${position.toFixed(2)} revision=${this.revision}`);
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new Error("Восстановление отменено.")); };
+              const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 1000 * this.recoveryAttempts);
+              signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort();
+            });
+            if (this.bridgeVersion >= 4) {
+              const result = await musicCall("discord_refresh", { session: this.session, revision: this.revision }, signal);
+              if (epoch !== this.epoch || signal.aborted) return;
+              if (result.cancelled) throw new Error("Текущая очередь изменилась.");
+            }
+            this.revision = -1;
+            await this.sync(true, true);
+            if (epoch !== this.epoch || signal.aborted || !this.following) return;
+            if (!this.child || !this.decoderAttached) throw new Error("Декодер не восстановлен.");
+            restored = true; this.error = "";
+            this.note("Музыка восстановлена; продолжаю текущую песню.");
+            return;
+          } catch {
+            if (epoch !== this.epoch || signal.aborted) return;
+            this.stopDecoder(); this.transport.stopMusic();
+            // A refresh can commit a revision before its response is lost.
+            // Re-read it so the next attempt addresses the actual current entry.
+            try { const current = await musicCall("discord_state", { session: this.session }, signal); if (epoch === this.epoch) this.revision = Number(current.revision); } catch {}
+          }
+        }
+      } finally {
+        if (epoch === this.epoch) this.recovering = false;
+      }
+      if (restored || epoch !== this.epoch || signal.aborted || !this.following) return;
+      this.note("Три попытки восстановления не помогли. Перехожу к следующей песне.");
+      this.trace("music_recovery exhausted; skipping current track");
+      try {
+        const result = await this.next(false) as { cancelled?: boolean; ended?: boolean };
+        if (epoch === this.epoch && result.cancelled) {
+          this.stop(); this.error = "[MUSIC_RECOVERY_EXHAUSTED] Очередь недоступна после обрыва. Проверьте подключение сервиса в Astra Music и включите музыку заново."; this.note(this.error, true);
+        } else if (result.ended) this.note("Песню восстановить не удалось; очередь закончилась.");
+      } catch { /* next() reports a bridge error with a user-facing explanation. */ }
+    })().catch(() => { if (epoch === this.epoch && !signal.aborted) { this.stop(); this.error = "Не удалось восстановить музыку. Проверьте подключение Astra Music."; this.note(this.error, true); } });
+  }
   async next(finished = false, direction = 1): Promise<unknown> {
     if (!this.following || !this.session) return { ok: true };
-    if (this.transitioning) return { ok: true, pending: true };
+    if (this.transitioning || this.recovering) return { ok: true, pending: true };
     this.transitioning = true;
     this.trace(`music_transition source=${finished ? "stream_end" : "command"} direction=${direction < 0 ? -1 : 1} revision=${this.revision}`);
     const epoch = this.epoch;
-    const playedSeconds = this.trackStartedAt ? Math.max(0, (Date.now() - this.trackStartedAt - this.pauseMillis - (this.paused ? Date.now() - this.pauseStartedAt : 0)) / 1000) : 0;
+    const playedSeconds = this.position();
     try {
       await this.syncFinished;
       if (epoch !== this.epoch) return { ok: true, cancelled: true };
@@ -161,7 +223,7 @@ export class DiscordMusic {
     if (!control) return undefined;
     if (!allowed()) return "У этого аккаунта нет доступа к управлению музыкой.";
     signal.throwIfAborted();
-    if (this.loading || this.transitioning || this.job?.status === "loading") return "Дождитесь завершения музыкального действия.";
+    if ((this.loading || this.transitioning || this.recovering || this.job?.status === "loading") && phrase !== "выключи музыку" && phrase !== "останови музыку") return "Дождитесь завершения музыкального действия.";
     if (/^пауза/u.test(phrase)) { this.setPaused(true); return "Музыка на паузе."; }
     if (phrase === "выключи музыку" || phrase === "останови музыку") { this.stop(); return "Музыка остановлена."; }
     if (/^(?:продолжи|возобнови) музыку$/u.test(phrase)) { this.setPaused(false); return "Продолжаю музыку."; }
@@ -208,22 +270,23 @@ export class DiscordMusic {
     if (help.includes("extension_picky")) options.push("-extension_picky", "0");
     this.hlsOptions.set(executable, options); return options;
   }
-  private async sync(transition = false): Promise<void> {
-    if (!this.following || this.polling || this.transitioning && !transition) return;
+  private async sync(transition = false, resume = false): Promise<void> {
+    if (!this.following || this.polling || (this.transitioning || this.recovering) && !transition) return;
     this.polling = true;
     let finished!: () => void;
     this.syncFinished = new Promise<void>(resolve => { finished = resolve; });
     const epoch = this.epoch;
     try {
       const track = await musicCall("discord_state", { session: this.session }, this.controller?.signal);
-      if (epoch !== this.epoch || !this.following || this.transitioning && !transition) return;
+      if (epoch !== this.epoch || !this.following || (this.transitioning || this.recovering) && !transition) return;
       this.bridgeVersion = Number(track.bridge_version) || 0;
-      if (this.revision < 0 && this.bridgeVersion < 3) this.note("Для полной загрузки музыкального потока обновите Astra Music до версии 1.1.6 или новее и перезапустите оба плагина.");
+      if (this.revision < 0 && this.bridgeVersion < 4) this.note("Для обновления ссылки при обрыве музыки обновите Astra Music до версии 1.1.7 или новее и перезапустите оба плагина.");
       if (!this.transport.connected) { this.stop(); return; }
       this.title = String(track.title || ""); this.artist = String(track.artist || "");
       this.service = track.service === "vk" ? "vk" : "yandex";
       if (!track.stream_url || ["stopped", "failed", "idle"].includes(track.status)) { this.stop(); return; }
       if (track.revision !== this.revision) {
+        if (!resume) { this.resumeSeconds = 0; this.expectedDuration = 0; this.recoveryAttempts = 0; }
         const url = new URL(track.stream_url);
         if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.search || url.hash || !/^\/[A-Za-z0-9_-]{32,100}\/discord-stream\/\d+\/0$/.test(url.pathname)) throw new Error("Неверный адрес музыкального потока.");
         const executable = await findMusicFFmpeg(this.settings().musicFFmpeg);
@@ -234,11 +297,13 @@ export class DiscordMusic {
         // loopback proxy. It receives no service cookies or signed CDN URLs.
         const hlsOptions = track.service === "vk" ? await this.decoderHlsOptions(executable) : [];
         if (epoch !== this.epoch) return;
-        const child = spawn(executable, ["-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-rw_timeout", "25000000", "-protocol_whitelist", "http,tcp,crypto", ...hlsOptions, "-i", url.href, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+        const resumeAt = this.resumeSeconds;
+        const seek = resumeAt > 0 ? ["-ss", resumeAt.toFixed(3)] : [];
+        const child = spawn(executable, ["-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-rw_timeout", "25000000", "-protocol_whitelist", "http,tcp,crypto", ...hlsOptions, ...seek, "-i", url.href, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
         this.child = child;
         this.trace(`music_decoder started revision=${this.revision}`);
         const pcm = new PassThrough({ highWaterMark: 96000 }); this.pcm = pcm;
-        let decodedBytes = 0, expectedSeconds = 0, stderr = "", streamInterrupted = false, drained = false, closed = false, completed = false;
+        let decodedBytes = 0, expectedSeconds = this.expectedDuration, stderr = "", streamInterrupted = false, drained = false, closed = false, completed = false;
         let exitCode: number | null = null;
         // Count decoded audio, not wall time: pauses and buffering do not shorten
         // a song. Parse fixed numeric fields only; raw logs contain signed URLs.
@@ -246,19 +311,22 @@ export class DiscordMusic {
         child.stderr.on("data", (chunk: Buffer) => {
           stderr = (stderr + chunk.toString("utf8")).slice(-8192);
           const duration = stderr.match(/Duration:\s*(\d{2,}):(\d{2}):(\d{2}(?:\.\d+)?)/);
-          if (duration) { const seconds = Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]); if (seconds > 0 && seconds <= 86400) expectedSeconds = seconds; }
+          if (duration) { const seconds = Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]); if (seconds > 0 && seconds <= 86400) { expectedSeconds = seconds; this.expectedDuration = seconds; } }
           streamInterrupted ||= /Stream ends prematurely|partial file|Input\/output error|Connection timed out|Connection reset by peer|Failed to open segment|Error opening input/i.test(stderr);
         });
         child.stdout.pipe(pcm);
-        const fail = (reason = "MUSIC_STREAM_FAILED") => { if (this.child !== child) return; this.trace(`music_decoder failed reason=${reason} decoded_seconds=${(decodedBytes / 192000).toFixed(2)} expected_seconds=${expectedSeconds.toFixed(2)}`); this.stop(); this.error = `[${reason}] Музыкальный поток оборвался до конца песни. Очередь остановлена. Повторно включите трек; при повторении проверьте подключение сервиса в Astra Music.`; this.note(this.error, true); };
+        const fail = (reason = "MUSIC_STREAM_FAILED") => { if (this.child !== child) return; this.trace(`music_decoder failed reason=${reason} decoded_seconds=${(resumeAt + decodedBytes / 192000).toFixed(2)} expected_seconds=${expectedSeconds.toFixed(2)}`); this.requestRecovery(child, reason); };
         const complete = () => {
-          if (completed || this.child !== child || !closed || !drained || exitCode !== 0) return;
+          if (completed || this.child !== child || !closed || !drained) return;
+          // A very short remaining tail can finish during startup. Let the
+          // transition/recovery finish before advancing, otherwise next() is busy.
+          if (this.recovering || this.transitioning) { setTimeout(complete, 50).unref(); return; }
           completed = true;
-          const decodedSeconds = decodedBytes / 192000;
+          const decodedSeconds = resumeAt + decodedBytes / 192000;
           const short = expectedSeconds > 0 && decodedSeconds + Math.max(5, expectedSeconds * .03) < expectedSeconds;
           // A transient HLS warning is not a lost song if all expected audio
           // arrived. Unknown duration still requires an unbroken stream.
-          if (!decodedBytes || short || streamInterrupted && !expectedSeconds) { fail(short ? "MUSIC_EARLY_EOF" : "MUSIC_STREAM_INTERRUPTED"); return; }
+          if (exitCode !== 0 || !decodedBytes || short || streamInterrupted && !expectedSeconds) { fail(short ? "MUSIC_EARLY_EOF" : "MUSIC_STREAM_INTERRUPTED"); return; }
           this.trace(`music_decoder completed decoded_seconds=${decodedSeconds.toFixed(2)} expected_seconds=${expectedSeconds.toFixed(2)}`);
           void this.next(true).catch(() => { if (epoch === this.epoch) fail("MUSIC_NEXT_FAILED"); });
         };
@@ -267,25 +335,29 @@ export class DiscordMusic {
           if (this.child !== child) return;
           closed = true; exitCode = code;
           this.trace(`music_decoder exited code=${code ?? "signal"}`);
-          if (code !== 0) { fail(); return; }
+          if (!this.decoderAttached && code !== 0) { fail(); return; }
           complete();
         });
         // EOF on stdout also happens on an error. Advance only after a successful
         // process exit AND consumption of the buffered PCM tail by Discord.
         pcm.once("end", () => { drained = true; complete(); });
-        await new Promise<void>((resolve, reject) => {
+        const signal = this.controller?.signal;
+        try { await new Promise<void>((resolve, reject) => {
+          let settled = false;
           const ready = () => { if (pcm.readableLength >= 48000 || pcm.writableFinished && pcm.readableLength > 0) finish(); };
           const failed = () => finish(new Error("Не удалось получить звук музыкального потока. Проверьте подключение сервиса в Astra Music."));
           const finish = (error?: Error) => {
-            clearTimeout(timer); pcm.off("readable", ready); pcm.off("finish", ready); child.off("close", failed); child.off("error", failed);
+            if (settled) return; settled = true;
+            clearTimeout(timer); pcm.off("readable", ready); pcm.off("finish", ready); pcm.off("close", failed); child.off("close", failed); child.off("error", failed); signal?.removeEventListener("abort", failed);
             error ? reject(error) : resolve();
           };
           const timer = setTimeout(failed, 30000);
-          pcm.on("readable", ready); pcm.once("finish", ready); child.once("close", failed); child.once("error", failed); ready();
-        });
+          pcm.on("readable", ready); pcm.once("finish", ready); pcm.once("close", failed); child.once("close", failed); child.once("error", failed); signal?.addEventListener("abort", failed, { once: true });
+          if (signal?.aborted) failed(); else ready();
+        }); } catch (error) { if (epoch !== this.epoch) return; if (resume) throw error; fail(); return; }
         if (epoch !== this.epoch || this.child !== child) return;
         this.transport.startMusic(pcm, this.selectedVolume ?? this.settings().musicVolume);
-        this.trackStartedAt = Date.now(); this.pauseMillis = 0; this.pauseStartedAt = this.paused ? Date.now() : 0;
+        this.decoderAttached = true;
       }
       this.transport.pauseMusic(this.paused);
       this.transport.musicPresence(this.title, this.artist, this.service, this.paused);

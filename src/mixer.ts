@@ -10,9 +10,10 @@ export class VoiceMixer extends Readable {
   volume = .5;
   private frames = 0;
   private underruns = 0;
+  private musicBytes = 0;
   constructor() { super({ objectMode: true, highWaterMark: 6 }); }
-  stats(): { frames: number; underruns: number } { return { frames: this.frames, underruns: this.underruns }; }
-  setMusic(source?: Readable): void { this.music = source; this.paused = false; }
+  stats(): { frames: number; underruns: number; musicBytes: number } { return { frames: this.frames, underruns: this.underruns, musicBytes: this.musicBytes }; }
+  setMusic(source?: Readable): void { this.music = source; this.paused = false; this.musicBytes = 0; }
   pauseMusic(value: boolean): void { this.paused = value; }
   stopSpeech(): void { const pending = this.speech; this.speech = undefined; pending?.finish(); }
   say(pcm: Buffer, signal: AbortSignal): Promise<void> {
@@ -36,6 +37,7 @@ export class VoiceMixer extends Readable {
         // Keep complete stereo samples together across arbitrary pipe chunks.
         // read(n) waits for a full frame, except for the final short EOF frame.
         music = this.music.read(3840);
+        if (music) this.musicBytes += music.length;
         if (!music && !this.music.readableEnded) this.underruns++;
       }
       for (let i = 0; i < 3840; i += 2) {
