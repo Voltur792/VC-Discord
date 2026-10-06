@@ -96,11 +96,16 @@ export class VoiceTransport {
     if (!connection || !this.connected || this.captures.has(userId) || this.captures.size >= 8 || !this.participants().some(m => m.id === userId)) return;
     if (settings.bargeIn) { this.stopPlayback(); this.onInterruption(); }
     const speaker: Speaker = { userId, guildId: this.guildId, channelId: this.channelId, generation: this.generation, membershipVersion: this.membershipVersions.get(userId) ?? 0 };
-    const stream: AudioReceiveStream = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: settings.silenceMs } });
-    const decoder = new OpusScript(48000, 2, OpusScript.Application.VOIP);
+    let decoder: OpusScript;
+    try { decoder = new OpusScript(48000, 2, OpusScript.Application.VOIP); }
+    catch { this.onState("Не удалось создать декодер звука Discord. Перезапустите VC-Discord.", true); return; }
+    const dispose = () => { try { decoder.delete(); } catch {} };
+    let stream: AudioReceiveStream;
+    try { stream = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: settings.silenceMs } }); }
+    catch { dispose(); this.onState("Не удалось начать приём звука Discord. Переподключите бота.", true); return; }
     const chunks: Buffer[] = []; let bytes = 0, ended = false, discarded = false, badPackets = 0, packets = 0, consecutiveBad = 0;
     const finish = () => {
-      if (ended) return; ended = true; clearTimeout(timer); this.captures.delete(userId); decoder.delete();
+      if (ended) return; ended = true; clearTimeout(timer); this.captures.delete(userId); dispose();
       if (!discarded && this.present(speaker) && bytes >= 48000 && badPackets <= packets * 0.05) {
         const pcm = Buffer.concat(chunks);
         if (rms(pcm) > 0.003) this.onAudio(speaker, pcm);
@@ -118,10 +123,13 @@ export class VoiceTransport {
         chunks.push(pcm);
       } catch (error) {
         badPackets++; consecutiveBad++;
+        const message = error instanceof Error ? error.message : "";
+        if (/abort|memory access|out of bounds|unreachable/i.test(message)) {
+          cancel(); this.onState("Декодер звука Discord остановлен после внутренней ошибки. Перезапустите VC-Discord.", true); return;
+        }
         // A single damaged frame must not cancel an otherwise valid utterance.
         if (consecutiveBad >= 4) {
           cancel();
-          const message = error instanceof Error ? error.message : "";
           const code = message.includes("Invalid packet") ? "OPUS_INVALID_PACKET" : message.includes("Buffer too small") ? "OPUS_FRAME_TOO_LONG" : "OPUS_DECODE_FAILED";
           this.onState(`Не удалось разобрать звук Discord (${code}). Переподключите бота к каналу.`, true);
         }

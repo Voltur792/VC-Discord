@@ -7,6 +7,7 @@ The plugin's own source is MIT, Copyright 2026 Voltur. Bundled libraries retain 
 - The bundled @discordjs/voice 0.19.2 receiver includes a compatibility backport for RTP CSRC identifiers and header extensions, adapted from commit 4dc1acc60 in packages/voice/src/receive/VoiceReceiver.ts. Original Apache-2.0 license is retained; the backport and source guards are in scripts/voice-compat.mjs.
 - @snazzah/davey 0.1.12 — MIT. Source: https://github.com/Snazzah/davey. The Windows x64 runtime in third_party/davey-win32-x64-msvc.node is copied from the pinned npm package @snazzah/davey-win32-x64-msvc 0.1.12; its license is third_party/davey-LICENSE.
 - opusscript — MIT, including BSD-licensed libopus. Original package and license are included under dist/native/opusscript.
+- The JavaScript bridge of pinned opusscript 0.1.1 is modified during build by scripts/opus-compat.mjs: PCM heap indexes are derived from byte pointers, allocations account for the native uint16 byte expansion and encoder packing loop, the maximum decoded frame matches the native 120 ms capacity, and input sizes are checked. Original licenses are retained; the WebAssembly/asm.js binaries are unchanged. Upstream bridge: https://github.com/abalabahaha/opusscript/blob/master/src/opusscript_encoder.cpp.
 - Versions are pinned in package-lock.json; original dependency license texts are collected under dist/licenses during build.
 
 Vosk is an optional separately installed runtime: https://alphacephei.com/vosk/. A small Russian model is downloaded only after a request in the local plugin UI.

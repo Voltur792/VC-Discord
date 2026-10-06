@@ -50,6 +50,8 @@ export class VoiceMixer extends Readable {
     } while (!this.destroyed);
   }
   _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    this.stopSpeech(); this.music = undefined; this.codec.delete(); callback(error);
+    this.stopSpeech(); this.music = undefined;
+    try { this.codec.delete(); } catch { error ??= new Error("Кодек музыки остановлен после внутренней ошибки."); }
+    callback(error);
   }
 }

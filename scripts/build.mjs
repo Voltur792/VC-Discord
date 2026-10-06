@@ -3,6 +3,7 @@ import { mkdir, cp, writeFile, rm, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { voiceCompatibility } from "./voice-compat.mjs";
+import { patchOpusScriptSource } from "./opus-compat.mjs";
 const require = createRequire(import.meta.url);
 // Astra serves contribution URLs relative to ui/, rather than the project root.
 await readFile("ui/web/index.html");
@@ -18,6 +19,10 @@ await cp("third_party/davey-LICENSE", "dist/licenses/davey/LICENSE");
 await mkdir("dist/licenses/web-stt", { recursive: true });
 await cp("third_party/web-stt-LICENSE", "dist/licenses/web-stt/LICENSE");
 await cp(dirname(require.resolve("opusscript")), "dist/native/opusscript", { recursive: true });
+const opusSource = require.resolve("opusscript");
+const opusPackage = JSON.parse(await readFile(join(dirname(opusSource), "package.json"), "utf8"));
+if (opusPackage.version !== "0.1.1") throw new Error("Review the PCM memory repair before changing the pinned OpusScript version.");
+await writeFile("dist/native/opusscript/index.js", patchOpusScriptSource(await readFile(opusSource, "utf8")));
 // GitHub's noarch job runs on Linux, where npm omits Windows-only packages.
 // Keep the pinned Windows runtime available for that cross-platform packaging.
 let daveySource;
