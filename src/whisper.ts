@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { join } from "node:path";
 import type { Settings } from "./config";
 import { astraRecognition } from "./astra-settings";
+import { pythonPath } from "./runtime";
 
 export class WhisperWorker {
   private child?: ChildProcessWithoutNullStreams;
@@ -17,7 +18,7 @@ export class WhisperWorker {
     this.stop();
     if (!s.whisperModelPath) throw new Error("Нажмите «Взять распознавание Astra» или укажите файл модели Whisper.");
     this.signature = signature;
-    const child = spawn(s.whisperPython || "python", ["-u", join(__dirname, "assets", "whisper_worker.py"), s.whisperModelPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    const child = spawn(pythonPath(s.whisperPython), ["-u", join(__dirname, "assets", "whisper_worker.py"), s.whisperModelPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     this.child = child; child.stderr.resume(); child.stdin.on("error", () => {});
     this.ready = new Promise((resolve, reject) => {
       let settled = false;

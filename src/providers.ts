@@ -9,6 +9,7 @@ import { localVisionBase } from "./screen";
 import { WhisperWorker } from "./whisper";
 import { chatSettings, astraRecognition } from "./astra-settings";
 import { googleTranscribe } from "./google-stt";
+import { pythonPath } from "./runtime";
 
 export type ChatContent = string | ({ type: "text"; text: string } | { type: "image_url"; image_url: { url: string; detail: "auto" } })[];
 export interface ChatMessage { role: "system" | "user" | "assistant"; content: ChatContent }
@@ -100,7 +101,7 @@ export class VoskWorker {
     this.stop();
     if (!s.voskModelPath) throw new Error("Выберите папку распакованной модели Vosk в настройках речи.");
     this.signature = signature;
-    this.child = spawn(s.sttPython || "python", ["-u", join(__dirname, "assets", "vosk_worker.py"), "--model", s.voskModelPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    this.child = spawn(pythonPath(s.sttPython), ["-u", join(__dirname, "assets", "vosk_worker.py"), "--model", s.voskModelPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     const child = this.child;
     child.stderr.resume();
     child.stdin.on("error", () => {});

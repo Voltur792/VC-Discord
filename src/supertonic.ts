@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { join } from "node:path";
 import type { Settings } from "./config";
 import { resample } from "./audio";
+import { pythonPath } from "./runtime";
 
 export class SupertonicWorker {
   private child?: ChildProcessWithoutNullStreams;
@@ -17,7 +18,7 @@ export class SupertonicWorker {
     this.stop();
     if (!s.supertonicModelPath) throw new Error("Укажите папку модели Supertonic или нажмите «Взять голос Astra».");
     this.signature = signature;
-    const child = spawn(s.ttsPython || "python", ["-u", join(__dirname, "assets", "supertonic_worker.py"), s.supertonicModelPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    const child = spawn(pythonPath(s.ttsPython), ["-u", join(__dirname, "assets", "supertonic_worker.py"), s.supertonicModelPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     this.child = child; child.stderr.resume(); child.stdin.on("error", () => {});
     this.ready = new Promise((resolve, reject) => {
       let settled = false;

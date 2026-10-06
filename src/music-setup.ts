@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { dataDir } from "./config";
+import { powershellPath } from "./runtime";
+import { windowsFailure, WindowsServiceError } from "./process";
 
 // A fixed Gyan essentials build linked from ffmpeg.org/download.html.
 // Never execute a downloaded file before checking the published archive digest.
@@ -120,14 +122,16 @@ export class MusicSetup {
   private extract(archive: string, destination: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     return new Promise<void>((resolve, reject) => {
-      const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", join(__dirname, "assets", "prepare_music.ps1")],
+      const child = spawn(powershellPath(), ["-NoProfile", "-NonInteractive", "-File", join(__dirname, "assets", "prepare_music.ps1")],
         { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-      this.child = child; child.stdout.resume(); child.stderr.resume(); child.stdin.on("error", () => {});
+      let diagnostic = "";
+      this.child = child; child.stdout.resume(); child.stderr.on("data", (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString("utf8")).slice(-8192); }); child.stdin.on("error", () => {});
       const abort = () => child.kill(); signal.addEventListener("abort", abort, { once: true });
-      child.once("error", () => reject(new MusicPreparationError("Windows не смогла распаковать FFmpeg. Повторите подготовку.")));
+      child.once("error", (error: NodeJS.ErrnoException) => reject(new MusicPreparationError(new WindowsServiceError(error.code === "ENOENT" ? "WIN_MISSING" : "WIN_ACCESS", "extract").message)));
       child.once("close", code => {
         signal.removeEventListener("abort", abort); if (this.child === child) this.child = undefined;
-        code === 0 && !signal.aborted ? resolve() : reject(new MusicPreparationError("Не удалось распаковать FFmpeg. Файл не установлен."));
+        const failure = windowsFailure(diagnostic);
+        code === 0 && !signal.aborted ? resolve() : reject(new MusicPreparationError(failure === "WIN_REQUEST" ? "Не удалось распаковать FFmpeg. Файл не установлен; проверьте свободное место и повторите подготовку." : new WindowsServiceError(failure, "extract", code).message));
       });
       child.stdin.end(JSON.stringify({ archive, destination })); if (signal.aborted) abort();
     });

@@ -11,10 +11,10 @@ import { VoiceBridge } from "./bridge";
 import { tabIcon } from "./tab-icon";
 
 const bridge = new VoiceBridge();
-const call = (operation: (value: unknown) => unknown) => async (value: unknown, ctx: PluginContext) => {
-  void ctx.log("info", "Discord voice UI action started").catch(() => {});
-  try { const result = await operation(value); void ctx.log("info", "Discord voice UI action completed").catch(() => {}); return result; }
-  catch (error) { return { ok: false, error: bridge.errorMessage(error) }; }
+const call = (operation: (value: unknown) => unknown, name = "ui") => async (value: unknown, ctx: PluginContext) => {
+  void ctx.log("info", `Discord voice UI action started: ${name}`).catch(() => {});
+  try { const result = await operation(value); void ctx.log("info", `Discord voice UI action completed: ${name}`).catch(() => {}); return result; }
+  catch (error) { bridge.recordError(error); return { ok: false, error: bridge.errorMessage(error) }; }
 };
 
 export const app = plugin({
@@ -27,6 +27,8 @@ export const app = plugin({
       // Explicit JSON keeps our status/error fields together with the settings.
       state: async () => JSON.stringify(await bridge.stateForUi()),
       model_connections: call(() => bridge.modelConnections()),
+      diagnose: call(() => bridge.diagnose(), "diagnose"),
+      diagnostic_report: call(() => bridge.diagnosticReport(), "diagnostic_report"),
       music_current: call(() => bridge.musicCurrent()),
       music_search: call(value => bridge.musicSearch(value)),
       music_playlists: call(value => bridge.musicPlaylists(value)),
@@ -35,23 +37,23 @@ export const app = plugin({
       music_pause: call(() => bridge.musicPause()),
       music_stop: call(() => bridge.musicStop()),
       music_volume: call(value => bridge.musicVolume(value)),
-      setup_music: call(() => bridge.setupMusic()),
-      save: call(value => bridge.save(value)),
-      connect: call(() => bridge.connect()),
+      setup_music: call(() => bridge.setupMusic(), "setup_music"),
+      save: call(value => bridge.save(value), "save"),
+      connect: call(() => bridge.connect(), "connect"),
       disconnect: call(() => bridge.disconnect()),
       stop: call(() => bridge.stopSpeech()),
       clear_history: call(() => bridge.clearHistory()),
       approve: call(value => bridge.approve(value)),
       reject: call(value => bridge.reject(value)),
-      models: call(value => bridge.models(value)),
-      voices: call(() => bridge.voices()),
+      models: call(value => bridge.models(value), "models"),
+      voices: call(() => bridge.voices(), "voices"),
       use_astra_voice: call(() => bridge.useAstraVoice()),
       use_astra_recognition: call(() => bridge.useAstraRecognition()),
       use_astra_chat_model: call(() => bridge.useAstraChatModel()),
-      setup_whisper: call(() => bridge.setupWhisper()),
+      setup_whisper: call(() => bridge.setupWhisper(), "setup_whisper"),
       discover_discord: call(() => bridge.discoverDiscord()),
-      test_voice: call(() => bridge.testVoice()),
-      setup_local: call(() => bridge.setupLocal()),
+      test_voice: call(() => bridge.testVoice(), "test_voice"),
+      setup_local: call(() => bridge.setupLocal(), "setup_local"),
       prepare_screen: call(() => bridge.prepareScreen()),
       preview_screen: call(() => bridge.previewScreen()),
       start_screen: call(() => bridge.startScreen()),

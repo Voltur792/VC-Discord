@@ -13,6 +13,8 @@ import { discoverDiscord } from "./discord-setup";
 import { BrowserScreen, localVisionBase, openScreenPicker } from "./screen";
 import { DiscordMusic } from "./music";
 import { MusicSetup } from "./music-setup";
+import { Diagnostics } from "./diagnostics";
+import { WindowsServiceError } from "./process";
 
 interface Job { speaker: Speaker; pcm: Buffer; createdAt: number }
 interface Pending { id: string; speaker: Speaker; command: string; expiresAt: number }
@@ -30,6 +32,15 @@ export class VoiceBridge {
   private setup = new LocalSetup();
   private whisperSetup = new WhisperSetup();
   private musicSetup = new MusicSetup();
+  private diagnostics = new Diagnostics(() => this.settings);
+  diagnose(): { ok: true } { return this.diagnostics.start(); }
+  diagnosticReport(): unknown { return this.diagnostics.report(); }
+  recordError(error: unknown): void {
+    this.diagnostics.record(error);
+    this.note(this.errorMessage(error), true);
+    const code = error instanceof WindowsServiceError ? `${error.code}; action=${error.action}; exit=${error.exitCode ?? "unknown"}` : "UI_ACTION_FAILED";
+    void this.ctx?.log("warn", `VC-Discord: ${code}`).catch(() => {});
+  }
   private recognitionImport?: WhisperWorker;
   private closing = false;
   private ctx?: PluginContext;
@@ -67,7 +78,7 @@ export class VoiceBridge {
     () => this.cancelWaiting(),
   );
   private readonly gate = new CommandGate(() => this.settings, speaker => !this.configSaving && this.transport.present(speaker), text => this.nativeCommand(text));
-  private readonly music = new DiscordMusic(this.transport, () => this.settings, (text, error) => this.note(text, error));
+  private readonly music = new DiscordMusic(this.transport, () => this.settings, (text, error) => this.note(text, error), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); });
   musicCurrent(): Promise<unknown> { return this.music.current(); }
   musicSearch(value: unknown): unknown { return this.music.beginJob("search", value); }
   musicPlay(value: unknown): unknown { return this.music.beginJob("play", value); }
@@ -81,12 +92,13 @@ export class VoiceBridge {
     this.ctx = ctx;
     this.closing = false;
     try { this.settings = await this.store.load(); }
-    catch (error) { this.loadError = safeError(error); this.note(this.loadError, true); }
+    catch (error) { this.loadError = safeError(error); this.note(this.loadError, true); this.diagnostics.record(error); }
+    this.diagnostics.start();
   }
   private note(text: string, error = false): void {
     this.updates.unshift({ at: Date.now(), text: safeError(new Error(text), this.settings), error });
     this.updates = this.updates.slice(0, 12);
-    if (error) this.lastError = this.updates[0].text;
+    if (error) { this.lastError = this.updates[0].text; if (/^\[MUSIC_[A-Z_]+\]/.test(text)) this.diagnostics.record(new Error(text)); else this.diagnostics.start(false); }
   }
   state(): Record<string, unknown> {
     if (this.pending && (this.pending.expiresAt <= Date.now() || !this.transport.present(this.pending.speaker))) this.pending = undefined;
@@ -103,6 +115,7 @@ export class VoiceBridge {
       screen: { active: this.screenSharing, lastSentAt: this.lastScreenAt, ...this.browserScreen.status() },
       music: this.music.state(),
       musicSetup: { running: this.musicSetup.running, ready: this.musicSetup.ready, status: this.musicSetup.status },
+      diagnostics: this.diagnostics.state(),
     };
   }
   async stateForUi(): Promise<Record<string, unknown>> {
@@ -147,7 +160,7 @@ export class VoiceBridge {
         const previous = this.settings;
         this.settings = await this.store.save(value);
         if (previous.botToken !== this.settings.botToken || previous.channelId !== this.settings.channelId || previous.guildId !== this.settings.guildId) this.disconnect();
-        this.providers.stop(); this.loadError = ""; this.lastError = ""; this.note("Настройки сохранены.");
+        this.providers.stop(); this.loadError = ""; this.lastError = ""; this.note("Настройки сохранены."); this.diagnostics.start();
         return { ok: true, settings: publicSettings(this.settings) };
       } finally { this.configSaving = false; }
     });
@@ -417,5 +430,5 @@ export class VoiceBridge {
     try { await this.say("Привет! Я Астра. Голосовое соединение с Discord работает.", controller.signal); return { ok: true }; }
     finally { if (this.controller === controller) this.controller = undefined; this.phase = this.transport.connected ? "listening" : "offline"; }
   }
-  shutdown(): void { this.closing = true; this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.musicSetup.stop(); this.disconnect(); }
+  shutdown(): void { this.closing = true; this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.musicSetup.stop(); this.disconnect(); }
 }

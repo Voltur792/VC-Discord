@@ -131,4 +131,18 @@ output { float: right; color: var(--text); }
 .track-row button { flex: none; }
 #musicSearch { margin-top: 14px; }
 #actionFeedback { padding: 0 18px 16px; }
+.diagnostics { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); margin: 12px 0 20px; }
+.diagnostics > summary { cursor: pointer; padding: 12px 16px; font-weight: 650; }
+.diagnostics > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.diagnostics > summary span { margin-left: 12px; font-size: 12px; font-weight: 400; }
+.diagnostic-body { padding: 0 16px 16px; }
+.diagnostic-body > .actions { margin: 12px 0; }
+.diagnostic-checks { list-style: none; margin: 12px 0; padding: 0; display: grid; gap: 8px; }
+.diagnostic-check { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); user-select: text; }
+.diagnostic-check .section-heading { margin: 0 0 8px; flex-wrap: wrap; }
+.diagnostic-check .help { overflow-wrap: anywhere; }
+.diagnostic-check small { display: block; color: var(--muted); margin-top: 8px; }
+.diagnostic-check button { margin-top: 8px; }
+.diagnostic-check [data-result="error"] { border-color: var(--color-error, #ef8897); }
+.diagnostic-check [data-result="warning"] { border-color: var(--color-warning, #d0b36f); }
 @media (max-width: 450px) { .title-row { align-items: flex-start; } h1 { font-size: 20px; overflow-wrap: anywhere; } .heading { gap: 8px; } .tabs button { padding: 8px 10px; font-size: 12px; } .panel { padding: 14px; } .track-row { flex-wrap: wrap; } }

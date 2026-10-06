@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>VC-Discord</title>
   <script src="http://astra-plugin.localhost/bridge/astra-bridge.js"></script>
-  <link rel="stylesheet" href="styles.css?v=18">
+  <link rel="stylesheet" href="styles.css?v=19">
 </head>
 <body>
 <main>
@@ -17,6 +17,16 @@
   <p class="help">Голосовой выход: «Астра, выйди из канала» — для аккаунтов из списка «Доступ к ПК». Если изменено имя для обращения, используйте выбранное имя.</p>
   <section class="screen-bar" aria-label="Показ экрана"><span id="screenStatus" role="status">Показ экрана выключен</span><button id="stopScreen" type="button" hidden>Остановить показ экрана</button></section>
   <p id="notice" class="notice" role="alert" hidden></p>
+  <details id="diagnostics" class="diagnostics">
+    <summary>Диагностика <span id="diagnosticSummary" class="muted" role="status" aria-live="polite">Проверяем компоненты…</span></summary>
+    <div class="diagnostic-body">
+      <p class="help">Проверка запускается автоматически при включении плагина и после ошибок. Проверяются сохранённые настройки. Пакеты и программы устанавливаются только кнопками подготовки.</p>
+      <div class="actions"><button id="diagnose" type="button">Проверить ещё раз</button><button id="diagnosticReport" type="button" disabled>Скачать отчёт</button></div>
+      <p id="diagnosticFailure" class="help" hidden></p>
+      <ul id="diagnosticChecks" class="diagnostic-checks" aria-label="Результаты диагностики" aria-busy="true"></ul>
+      <p class="help">Отчёт содержит версии программ, результаты проверок и код последней ошибки. Ключи, токен бота, речь, история и пути к личным файлам в него не включаются.</p>
+    </div>
+  </details>
   <section id="approval" class="approval" hidden aria-labelledby="approvalTitle"><div><h2 id="approvalTitle">Подтвердить команду на ПК</h2><p id="commandSpeaker" class="muted"></p><p id="pendingCommand" class="command-text"></p><p class="muted">Подтверждение действует одну минуту и относится только к этому запросу.</p></div><div class="actions"><button id="approve" class="primary" type="button">Выполнить</button><button id="reject" type="button">Отменить</button></div></section>
       <nav class="tabs" role="tablist" aria-label="Настройки плагина"><button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="true" tabindex="0" data-tab="connection">Подключение</button><button role="tab" id="tab-voice" aria-controls="panel-voice" aria-selected="false" tabindex="-1" data-tab="voice">Голос и модель</button><button role="tab" id="tab-screen" aria-controls="panel-screen" aria-selected="false" tabindex="-1" data-tab="screen">Экран</button><button role="tab" id="tab-access" aria-controls="panel-access" aria-selected="false" tabindex="-1" data-tab="access">Доступ к ПК</button><button role="tab" id="tab-music" aria-controls="panel-music" aria-selected="false" tabindex="-1" data-tab="music">Музыка</button></nav>
   <div class="layout">
@@ -84,6 +94,6 @@
   </div>
   <footer class="bottom-note">Бот работает, пока запущена Astra. «Использовать всё из Astra» выбирает её чат, распознавание и доступный голос; ключи провайдеров вводятся отдельно один раз.</footer>
 </main>
-  <script src="app.js?v=21"></script>
+  <script src="app.js?v=22"></script>
 </body>
 </html>

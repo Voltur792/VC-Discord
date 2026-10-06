@@ -115,6 +115,7 @@ async function action(button, operation) {
 }
 function render(state) {
   snapshot = state;
+  renderDiagnostics(state.diagnostics, state);
   if (!dirty && !document.activeElement?.closest("#settingsForm")) fill(state.settings);
   $("connectionBadge").textContent = labels[state.phase] || "Отключён";
   $("connectionBadge").classList.toggle("live", state.connected);
@@ -186,6 +187,38 @@ async function refresh() {
   catch (error) { notice(error.message); }
   finally { polling = false; }
 }
+let diagnosticKey = "", diagnosticFailureAt = 0;
+function renderDiagnostics(report, state) {
+  if (!report) return;
+  const checks = report.checks || [], errors = checks.filter(v => v.result === "error").length, warnings = checks.filter(v => v.result === "warning").length;
+  $("diagnosticSummary").textContent = report.running ? "Проверяем компоненты…" : !report.checkedAt ? "Проверка ещё не выполнена" : errors ? "Проблем: " + errors : warnings ? "Нужна настройка: " + warnings : "Проверки пройдены";
+  $("diagnose").disabled = busy || report.running;
+  $("diagnosticReport").disabled = !report.checkedAt || report.running;
+  $("diagnosticChecks").setAttribute("aria-busy", String(report.running));
+  $("diagnosticFailure").hidden = !report.lastFailure;
+  if (report.lastFailure?.at > diagnosticFailureAt) { diagnosticFailureAt = report.lastFailure.at; if (/^(WIN_|MUSIC_)/.test(report.lastFailure.code)) $("diagnostics").open = true; }
+  $("diagnosticFailure").textContent = report.lastFailure ? "Последний сбой: [" + report.lastFailure.code + "] " + report.lastFailure.detail.replace(/^\[[A-Z_]+\]\s*/, "") : "";
+  const key = JSON.stringify([checks, busy, state.localSetup?.running, state.whisperSetup?.running, state.musicSetup?.running]);
+  if (key === diagnosticKey) return; diagnosticKey = key;
+  $("diagnosticChecks").replaceChildren();
+  const statuses = { ok: "Готово", warning: "Нужна настройка", error: "Ошибка" }, fixes = { setup_local: ["Подготовить Vosk", "localSetup"], setup_whisper: ["Подготовить Whisper", "whisperSetup"], setup_music: ["Подготовить музыку", "musicSetup"] };
+  for (const item of checks) {
+    const row = document.createElement("li"), heading = document.createElement("div"), title = document.createElement("strong"), status = document.createElement("span"), detail = document.createElement("p"), code = document.createElement("small");
+    row.className = "diagnostic-check"; heading.className = "section-heading"; title.textContent = item.title; status.textContent = statuses[item.result] || "Не проверено"; status.className = "badge"; status.dataset.result = item.result; heading.append(title, status);
+    detail.className = "help"; detail.textContent = item.detail; code.textContent = item.code; row.append(heading, detail, code);
+    if (fixes[item.fix]) {
+      const [label, setup] = fixes[item.fix], button = document.createElement("button"); button.type = "button"; button.textContent = label; button.disabled = busy || state[setup]?.running;
+      button.onclick = () => action(button, async () => { await backend(item.fix); notice("Подготовка запущена. Её состояние показано во вкладке «" + (item.fix === "setup_music" ? "Музыка" : "Голос и модель") + "». После завершения нажмите «Проверить ещё раз»."); }); row.append(button);
+    }
+    $("diagnosticChecks").append(row);
+  }
+}
+$('diagnose').onclick = () => action($('diagnose'), () => backend('diagnose'));
+$('diagnosticReport').onclick = () => action($('diagnosticReport'), async () => {
+  const report = await backend('diagnostic_report');
+  const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a'); link.href = url; link.download = 'VC-Discord-diagnostics.json'; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+});
 function markDirty() { dirty = true; $("saveHint").textContent = "Есть несохранённые изменения"; }
 function selectTab(name, focus = true) {
   for (const tab of document.querySelectorAll("[data-tab]")) { const selected = tab.dataset.tab === name; tab.setAttribute("aria-selected", String(selected)); tab.tabIndex = selected ? 0 : -1; $("panel-" + tab.dataset.tab).hidden = !selected; if (selected && focus) tab.focus(); }

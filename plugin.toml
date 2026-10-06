@@ -1,7 +1,7 @@
 [plugin]
 id = "discord-voice-bridge"
 name = "Voice communication-Discord"
-version = "1.0.2"
+version = "1.0.3"
 description = "Talk with a voice bot in Discord; allow PC commands only from the Discord accounts you choose."
 author = "Voltur"
 license = "MIT"

@@ -57,9 +57,10 @@ export class DiscordMusic {
   private volumeRevision = 0;
   private readonly volumeInstance = randomBytes(16).toString("hex");
   private syncFinished: Promise<void> = Promise.resolve();
-  constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void) {}
+  constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void, private trace: (text: string) => void = () => {}) {}
   state(): Record<string, unknown> { return { following: this.following, loading: this.loading || this.transitioning, paused: this.paused, title: this.title, artist: this.artist, error: this.error, playing: !!this.child && !this.paused, volume: this.selectedVolume ?? this.settings().musicVolume, volumeRevision: this.volumeRevision, volumeInstance: this.volumeInstance, audio: this.transport.musicStats(), job: this.job }; }
   beginJob(method: "search" | "playlists" | "play" | "next", value: unknown = {}): unknown {
+    if (method === "next" || method === "play") this.trace(`music_button action=${method}`);
     if (this.job?.status === "loading") throw new Error("Дождитесь завершения музыкального действия.");
     const job = { id: randomBytes(16).toString("hex"), status: "loading" } as NonNullable<typeof this.job>;
     this.job = job;
@@ -127,6 +128,7 @@ export class DiscordMusic {
     if (!this.following || !this.session) return { ok: true };
     if (this.transitioning) return { ok: true, pending: true };
     this.transitioning = true;
+    this.trace(`music_transition source=${finished ? "stream_end" : "command"} direction=${direction < 0 ? -1 : 1} revision=${this.revision}`);
     const epoch = this.epoch;
     const playedSeconds = this.trackStartedAt ? Math.max(0, (Date.now() - this.trackStartedAt - this.pauseMillis - (this.paused ? Date.now() - this.pauseStartedAt : 0)) / 1000) : 0;
     try {
@@ -162,7 +164,7 @@ export class DiscordMusic {
     if (/^пауза/u.test(phrase)) { this.setPaused(true); return "Музыка на паузе."; }
     if (phrase === "выключи музыку" || phrase === "останови музыку") { this.stop(); return "Музыка остановлена."; }
     if (/^(?:продолжи|возобнови) музыку$/u.test(phrase)) { this.setPaused(false); return "Продолжаю музыку."; }
-    if (/^(?:следующ|предыдущ)/u.test(phrase)) { await this.next(false, phrase.startsWith("предыдущ") ? -1 : 1); return "Переключаю трек."; }
+    if (/^(?:следующ|предыдущ)/u.test(phrase)) { this.trace("music_voice action=next"); await this.next(false, phrase.startsWith("предыдущ") ? -1 : 1); return "Переключаю трек."; }
     if (/громче|тише/u.test(phrase)) { this.volume({ level: Math.max(0, Math.min(10, (this.selectedVolume ?? this.settings().musicVolume) / 10 + (phrase.includes("громче") ? 1 : -1))) }); return "Громкость " + (this.selectedVolume! / 10) + " из десяти."; }
     if (phrase.includes("громкость")) {
       const words: Record<string, number> = { ноль: 0, один: 1, одна: 1, два: 2, две: 2, три: 3, четыре: 4, пять: 5, шесть: 6, семь: 7, восемь: 8, девять: 9, десять: 10, одиннадцать: 11, двенадцать: 12, тринадцать: 13, четырнадцать: 14, пятнадцать: 15, шестнадцать: 16, семнадцать: 17, восемнадцать: 18, девятнадцать: 19, двадцать: 20, тридцать: 30, сорок: 40, пятьдесят: 50, шестьдесят: 60, семьдесят: 70, восемьдесят: 80, девяносто: 90, сто: 100 };
@@ -192,7 +194,7 @@ export class DiscordMusic {
     if (signal.aborted || !allowed()) return "Управление музыкой отменено.";
     const abort = () => this.stop(); signal.addEventListener("abort", abort, { once: true });
     let result: any;
-    try { result = await this.play(input); }
+    try { this.trace("music_voice action=play"); result = await this.play(input); }
     finally { signal.removeEventListener("abort", abort); }
     return signal.aborted || result?.cancelled ? undefined : "Включаю " + (this.title || "музыку") + " в Discord.";
   }
@@ -229,18 +231,43 @@ export class DiscordMusic {
         // loopback proxy. It receives no service cookies or signed CDN URLs.
         const hlsOptions = track.service === "vk" ? await this.decoderHlsOptions(executable) : [];
         if (epoch !== this.epoch) return;
-        const child = spawn(executable, ["-hide_banner", "-loglevel", "error", "-nostdin", "-rw_timeout", "25000000", "-protocol_whitelist", "http,tcp,crypto", ...hlsOptions, "-i", url.href, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+        const child = spawn(executable, ["-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-rw_timeout", "25000000", "-protocol_whitelist", "http,tcp,crypto", ...hlsOptions, "-i", url.href, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
         this.child = child;
+        this.trace(`music_decoder started revision=${this.revision}`);
         const pcm = new PassThrough({ highWaterMark: 96000 }); this.pcm = pcm;
+        let decodedBytes = 0, expectedSeconds = 0, stderr = "", streamInterrupted = false, drained = false, closed = false, completed = false;
+        let exitCode: number | null = null;
+        // Count decoded audio, not wall time: pauses and buffering do not shorten
+        // a song. Parse fixed numeric fields only; raw logs contain signed URLs.
+        child.stdout.on("data", (chunk: Buffer) => { decodedBytes += chunk.length; });
+        child.stderr.on("data", (chunk: Buffer) => {
+          stderr = (stderr + chunk.toString("utf8")).slice(-8192);
+          const duration = stderr.match(/Duration:\s*(\d{2,}):(\d{2}):(\d{2}(?:\.\d+)?)/);
+          if (duration) { const seconds = Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]); if (seconds > 0 && seconds <= 86400) expectedSeconds = seconds; }
+          streamInterrupted ||= /Stream ends prematurely|partial file|Input\/output error|Connection timed out|Connection reset by peer|Failed to open segment|Error opening input/i.test(stderr);
+        });
         child.stdout.pipe(pcm);
-        const fail = () => { if (this.child !== child) return; this.stop(); this.error = "Музыкальный поток прерван. Проверьте трек в Astra Music и запустите трансляцию заново."; this.note(this.error, true); };
-        child.on("error", fail); child.stdin.on("error", () => {}); child.stdout.on("error", fail); pcm.on("error", fail); child.stderr.resume();
+        const fail = (reason = "MUSIC_STREAM_FAILED") => { if (this.child !== child) return; this.trace(`music_decoder failed reason=${reason} decoded_seconds=${(decodedBytes / 192000).toFixed(2)} expected_seconds=${expectedSeconds.toFixed(2)}`); this.stop(); this.error = `[${reason}] Музыкальный поток оборвался до конца песни. Очередь остановлена. Повторно включите трек; при повторении проверьте подключение сервиса в Astra Music.`; this.note(this.error, true); };
+        const complete = () => {
+          if (completed || this.child !== child || !closed || !drained || exitCode !== 0) return;
+          completed = true;
+          const decodedSeconds = decodedBytes / 192000;
+          const short = expectedSeconds > 0 && decodedSeconds + Math.max(5, expectedSeconds * .03) < expectedSeconds;
+          if (!decodedBytes || short || streamInterrupted) { fail(short ? "MUSIC_EARLY_EOF" : "MUSIC_STREAM_INTERRUPTED"); return; }
+          this.trace(`music_decoder completed decoded_seconds=${decodedSeconds.toFixed(2)} expected_seconds=${expectedSeconds.toFixed(2)}`);
+          void this.next(true).catch(() => { if (epoch === this.epoch) fail("MUSIC_NEXT_FAILED"); });
+        };
+        child.on("error", () => fail()); child.stdin.on("error", () => {}); child.stdout.on("error", () => fail()); pcm.on("error", () => fail());
         child.on("close", code => {
           if (this.child !== child) return;
+          closed = true; exitCode = code;
+          this.trace(`music_decoder exited code=${code ?? "signal"}`);
           if (code !== 0) { fail(); return; }
+          complete();
         });
-        // Wait until the buffered tail has actually been consumed by Discord.
-        pcm.once("end", () => { if (this.child === child) void this.next(true).catch(() => { if (epoch === this.epoch) fail(); }); });
+        // EOF on stdout also happens on an error. Advance only after a successful
+        // process exit AND consumption of the buffered PCM tail by Discord.
+        pcm.once("end", () => { drained = true; complete(); });
         await new Promise<void>((resolve, reject) => {
           const ready = () => { if (pcm.readableLength >= 48000 || pcm.writableFinished && pcm.readableLength > 0) finish(); };
           const failed = () => finish(new Error("Не удалось получить звук музыкального потока. Проверьте подключение сервиса в Astra Music."));
