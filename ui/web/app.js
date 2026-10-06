@@ -1,7 +1,7 @@
 (function () {
 "use strict";
 const $ = id => document.getElementById(id);
-let snapshot, dirty = false, busy = false, polling = false, noticeError = "";
+let snapshot, dirty = false, busy = false, polling = false, noticeError = "", noticeSource = "action";
 let participantsKey = "";
 let moderationRoomsKey = "";
 const clearSecrets = new Set();
@@ -56,7 +56,7 @@ async function backend(method, params = {}) {
   if (result?.ok === false || result?.error && !result?.settings) throw new Error(result.error || "Не удалось выполнить действие.");
   return result;
 }
-function notice(message = "") { noticeError = message; for (const id of ["notice", "actionFeedback"]) { $(id).textContent = message; $(id).hidden = !message; } }
+function notice(message = "", source = "action") { noticeError = message; noticeSource = source; for (const id of ["notice", "actionFeedback"]) { $(id).textContent = message; $(id).hidden = !message; } }
 function primaryContrast() {
   const first = document.querySelector("button.primary"); if (!first) return;
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1; const context = canvas.getContext("2d"); if (!context) return;
@@ -185,7 +185,8 @@ function render(state) {
   if (state.localSetup) { $("setupLocal").disabled = state.localSetup.running || busy; $("setupStatus").textContent = state.localSetup.status || "Создаст отдельное окружение и скачает русскую модель, около 45 МБ."; }
   if (state.musicSetup) { $("setupMusic").disabled = state.musicSetup.running || busy; $("setupMusic").textContent = state.musicSetup.running ? "Подготовка музыки…" : "Подготовить музыку"; $("musicSetupStatus").textContent = state.musicSetup.status; }
   if (state.whisperSetup) { $("setupWhisper").disabled = state.whisperSetup.running || busy; $("astraRecognition").disabled = state.whisperSetup.running || busy; $("whisperSetupStatus").textContent = state.whisperSetup.status || "Установит движок Whisper в отдельное окружение. Модель Astra повторно не скачивается."; }
-  if (state.error && !noticeError) notice(state.error);
+  if (noticeSource === "state" || noticeSource === "connection") notice(state.error || "", "state");
+  else if (state.error && !noticeError) notice(state.error, "state");
   primaryContrast();
 }
 function editVoiceAlias(field, id) {
@@ -214,7 +215,7 @@ $("copyModerators").onclick = () => { $("moderatorUserIds").value = $("allowedUs
 async function refresh() {
   if (polling || document.hidden) return; polling = true;
   try { render(await backend("state")); }
-  catch (error) { notice(error.message); }
+  catch (error) { notice(error.message, "connection"); }
   finally { polling = false; }
 }
 let diagnosticKey = "", diagnosticFailureAt = 0;

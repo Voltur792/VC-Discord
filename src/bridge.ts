@@ -51,6 +51,7 @@ export class VoiceBridge {
   private phase = "offline";
   private status = "Готов к настройке";
   private lastError = "";
+  private lastErrorSource?: "voice_receive";
   private loadError = "";
   private configSaving = false;
   private history: ChatMessage[] = [];
@@ -74,7 +75,12 @@ export class VoiceBridge {
   private readonly transport = new VoiceTransport(
     () => this.settings,
     (speaker, pcm) => this.enqueue(speaker, pcm),
-    (message, error) => { this.status = message; this.note(message, !!error); },
+    (message, error, source) => {
+      this.status = message;
+      if (source === "voice_receive" && !error && this.lastErrorSource === source) { this.lastError = ""; this.lastErrorSource = undefined; }
+      this.note(message, !!error, source);
+      if (source === "voice_receive") { const code = error ? message.match(/\bOPUS_[A-Z_]+\b/)?.[0] || "VOICE_RECEIVE_FAILED" : "VOICE_RECEIVE_RECOVERED"; void this.ctx?.log(error ? "warn" : "info", `VC-Discord: ${code}`).catch(() => {}); }
+    },
     () => { if (this.phase === "speaking" || this.phase === "thinking") this.controller?.abort(); },
     () => this.cancelWaiting(),
   );
@@ -97,10 +103,10 @@ export class VoiceBridge {
     catch (error) { this.loadError = safeError(error); this.note(this.loadError, true); this.diagnostics.record(error); }
     this.diagnostics.start();
   }
-  private note(text: string, error = false): void {
+  private note(text: string, error = false, source?: "voice_receive"): void {
     this.updates.unshift({ at: Date.now(), text: safeError(new Error(text), this.settings), error });
     this.updates = this.updates.slice(0, 12);
-    if (error) { this.lastError = this.updates[0].text; if (/^\[MUSIC_[A-Z_]+\]/.test(text)) this.diagnostics.record(new Error(text)); else this.diagnostics.start(false); }
+    if (error) { this.lastError = this.updates[0].text; this.lastErrorSource = source; if (/^\[MUSIC_[A-Z_]+\]/.test(text)) this.diagnostics.record(new Error(text)); else this.diagnostics.start(false); }
   }
   state(): Record<string, unknown> {
     if (this.pending && (this.pending.expiresAt <= Date.now() || !this.transport.present(this.pending.speaker))) this.pending = undefined;
@@ -164,7 +170,7 @@ export class VoiceBridge {
         const previous = this.settings;
         this.settings = await this.store.save(value);
         if (previous.botToken !== this.settings.botToken || previous.channelId !== this.settings.channelId || previous.guildId !== this.settings.guildId) this.disconnect();
-        this.providers.stop(); this.loadError = ""; this.lastError = ""; this.note("Настройки сохранены."); this.diagnostics.start();
+        this.providers.stop(); this.loadError = ""; this.lastError = ""; this.lastErrorSource = undefined; this.note("Настройки сохранены."); this.diagnostics.start();
         return { ok: true, settings: publicSettings(this.settings) };
       } finally { this.configSaving = false; }
     });
@@ -172,7 +178,7 @@ export class VoiceBridge {
   }
   async connect(): Promise<unknown> {
     if (this.configSaving) throw new Error("Дождитесь сохранения настроек.");
-    this.phase = "connecting"; this.lastError = "";
+    this.phase = "connecting"; this.lastError = ""; this.lastErrorSource = undefined;
     try {
       if (this.loadError) throw new Error(this.loadError);
       validateSettings(this.settings);

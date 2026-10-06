@@ -21,13 +21,14 @@ export class VoiceTransport {
   private personNumbers = new Map<string, number>();
   private roomNumbers = new Map<string, number>();
   private connecting = false;
+  private receiveFailed = false;
   private activity = "";
   private activityAt = 0;
   private activityTimer?: NodeJS.Timeout;
   private pendingActivity?: { name: string; type: ActivityType.Listening | ActivityType.Watching };
   botName = "";
   channelName = "";
-  constructor(private getSettings: () => Settings, private onAudio: (speaker: Speaker, pcm: Buffer) => void, private onState: (message: string, error?: boolean) => void, private onInterruption: () => void, private onInvalidate: () => void) {
+  constructor(private getSettings: () => Settings, private onAudio: (speaker: Speaker, pcm: Buffer) => void, private onState: (message: string, error?: boolean, source?: "voice_receive") => void, private onInterruption: () => void, private onInvalidate: () => void) {
     this.player.on("error", () => this.onState("Ошибка воспроизведения ответа.", true));
   }
   get connected(): boolean { return this.connection?.state.status === VoiceConnectionStatus.Ready && !!this.client?.isReady(); }
@@ -100,6 +101,7 @@ export class VoiceTransport {
   }
   invalidate(): void {
     this.generation++;
+    this.receiveFailed = false;
     for (const capture of [...this.captures.values()]) capture.cancel();
     this.captures.clear(); this.stopMusic(); this.stopPlayback(); this.onInvalidate();
   }
@@ -158,6 +160,10 @@ export class VoiceTransport {
       throw error;
     } finally { this.connecting = false; }
   }
+  private receiveError(message: string): void {
+    this.receiveFailed = true;
+    this.onState(message, true, "voice_receive");
+  }
   private capture(userId: string): void {
     const connection = this.connection, settings = this.getSettings();
     if (!connection || !this.connected || this.captures.has(userId) || this.captures.size >= 8 || !this.participants().some(m => m.id === userId)) return;
@@ -165,17 +171,20 @@ export class VoiceTransport {
     const speaker: Speaker = { userId, guildId: this.guildId, channelId: this.channelId, generation: this.generation, membershipVersion: this.membershipVersions.get(userId) ?? 0 };
     let decoder: OpusScript;
     try { decoder = new OpusScript(48000, 2, OpusScript.Application.VOIP); }
-    catch { this.onState("Не удалось создать декодер звука Discord. Перезапустите VC-Discord.", true); return; }
+    catch { this.receiveError("Не удалось создать декодер звука Discord. Перезапустите VC-Discord."); return; }
     const dispose = () => { try { decoder.delete(); } catch {} };
     let stream: AudioReceiveStream;
     try { stream = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: settings.silenceMs } }); }
-    catch { dispose(); this.onState("Не удалось начать приём звука Discord. Переподключите бота.", true); return; }
+    catch { dispose(); this.receiveError("Не удалось начать приём звука Discord. Переподключите бота."); return; }
     const chunks: Buffer[] = []; let bytes = 0, ended = false, discarded = false, badPackets = 0, packets = 0, consecutiveBad = 0;
     const finish = () => {
       if (ended) return; ended = true; clearTimeout(timer); this.captures.delete(userId); dispose();
       if (!discarded && this.present(speaker) && bytes >= 48000 && badPackets <= packets * 0.05) {
         const pcm = Buffer.concat(chunks);
-        if (rms(pcm) > 0.003) this.onAudio(speaker, pcm);
+        if (rms(pcm) > 0.003) {
+          if (this.receiveFailed) { this.receiveFailed = false; this.onState("Приём речи Discord восстановлен.", false, "voice_receive"); }
+          this.onAudio(speaker, pcm);
+        }
       }
     };
     const cancel = () => { discarded = true; stream.destroy(); finish(); };
@@ -192,17 +201,17 @@ export class VoiceTransport {
         badPackets++; consecutiveBad++;
         const message = error instanceof Error ? error.message : "";
         if (/abort|memory access|out of bounds|unreachable/i.test(message)) {
-          cancel(); this.onState("Декодер звука Discord остановлен после внутренней ошибки. Перезапустите VC-Discord.", true); return;
+          cancel(); this.receiveError("Декодер звука Discord остановлен после внутренней ошибки. Перезапустите VC-Discord."); return;
         }
         // A single damaged frame must not cancel an otherwise valid utterance.
         if (consecutiveBad >= 4) {
           cancel();
           const code = message.includes("Invalid packet") ? "OPUS_INVALID_PACKET" : message.includes("Buffer too small") ? "OPUS_FRAME_TOO_LONG" : "OPUS_DECODE_FAILED";
-          this.onState(`Не удалось разобрать звук Discord (${code}). Переподключите бота к каналу.`, true);
+          this.receiveError(`Реплика пропущена из-за повреждённого звука Discord (${code}). Бот продолжает слушать; повторите реплику. Если ошибка повторяется, переподключите бота.`);
         }
       }
     });
-    stream.on("end", finish); stream.on("close", finish); stream.on("error", () => { cancel(); this.onState("Поток звука Discord прерван. Переподключите бота к каналу.", true); });
+    stream.on("end", finish); stream.on("close", finish); stream.on("error", () => { if (ended) return; cancel(); this.receiveError("Поток звука Discord прерван. Бот продолжает слушать; повторите реплику. Если ошибка повторяется, переподключите бота."); });
   }
   async play(pcm: Buffer, signal: AbortSignal): Promise<void> {
     if (!this.connected || signal.aborted) return;
