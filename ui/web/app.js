@@ -2,6 +2,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let snapshot, dirty = false, busy = false, polling = false, noticeError = "", noticeSource = "action";
+let editRevision = 0, saveFlight, autoSaveTimer;
 let participantsKey = "";
 let moderationRoomsKey = "";
 const clearSecrets = new Set();
@@ -10,11 +11,11 @@ let modelConnections = [], currentMusic;
 let volumeEditing = false, volumePending = 0, volumeRevision = 0, volumeInstance = "";
 function drawPickers() {
   for (const picker of pickers) {
-    const signature = JSON.stringify([...picker.select.options].map(o => [o.value, o.textContent]));
+    const signature = JSON.stringify([...picker.select.options].map(o => [o.value, o.textContent, o.disabled]));
     if (signature !== picker.signature) {
       picker.signature = signature; picker.menu.replaceChildren();
       picker.options = [...picker.select.options].map(option => {
-        const item = document.createElement("button"); item.type = "button"; item.setAttribute("role", "option"); item.textContent = option.textContent;
+        const item = document.createElement("button"); item.type = "button"; item.setAttribute("role", "option"); item.textContent = option.textContent; item.disabled = option.disabled;
         item.onclick = () => { picker.select.value = option.value; picker.select.dispatchEvent(new Event("change", { bubbles: true })); closePickers(); drawPickers(); picker.button.focus(); };
         picker.menu.append(item); return { value: option.value, button: item };
       });
@@ -43,7 +44,7 @@ async function backend(method, params = {}) {
   while (!window.astra?.callBackend && Date.now() < bridgeDeadline) await new Promise(resolve => setTimeout(resolve, 100));
   if (!window.astra?.callBackend) throw new Error("Нет связи вкладки с Astra. Выключите и включите плагин, затем откройте вкладку заново.");
   let timer;
-  const timeout = method === "state" ? 5000 : method === "start_screen" ? 35000 : ["connect", "use_astra_recognition"].includes(method) ? 110000 : ["models", "test_voice", "use_astra_voice", "discover_discord", "music_play", "music_search"].includes(method) ? 100000 : 15000;
+  const timeout = method === "state" ? 5000 : method === "start_screen" ? 35000 : method === "use_astra_voice" ? 150000 : ["connect", "use_astra_recognition"].includes(method) ? 110000 : ["models", "test_voice", "find_voice_runtime", "discover_discord", "music_play", "music_search"].includes(method) ? 100000 : 15000;
   let result;
   try { result = await Promise.race([window.astra.callBackend(method, params), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Astra не ответила на «" + method + "». Перезапустите плагин. Отправленное действие могло продолжить выполняться.")), timeout); })]); }
   finally { clearTimeout(timer); }
@@ -53,7 +54,7 @@ async function backend(method, params = {}) {
     const text = result.content.find(item => item.type === "text")?.text;
     if (text) { try { result = JSON.parse(text); } catch { result = { error: text }; } }
   }
-  if (result?.ok === false || result?.error && !result?.settings) throw new Error(result.error || "Не удалось выполнить действие.");
+  if (result?.ok === false || result?.error && !result?.settings) { const error = new Error(result.error || "Не удалось выполнить действие."); error.stateError = true; throw error; }
   return result;
 }
 function notice(message = "", source = "action") { noticeError = message; noticeSource = source; for (const id of ["notice", "actionFeedback"]) { $(id).textContent = message; $(id).hidden = !message; } }
@@ -101,17 +102,48 @@ function providerPanels() {
   $("llmKeyHelp").textContent = "Ключи вводятся здесь один раз и хранятся зашифрованными отдельно для каждого провайдера и адреса API. При переключении подключения его ключ возвращается автоматически. Пустое поле сохраняет прежний ключ этого подключения.";
   $("ttsApi").hidden = $("ttsEngine").value !== "api"; $("ttsWindows").hidden = $("ttsEngine").value !== "windows";
   $("ttsSupertonic").hidden = $("ttsEngine").value !== "supertonic";
+  $("supertonicVoice").querySelector('[value="custom"]').disabled = !$("supertonicCustomVoicePath").value;
+  drawCustomVoiceLabel();
+}
+function drawCustomVoiceLabel() { $("customVoiceStatus").textContent = $("supertonicCustomVoicePath").value ? "Свой голос сохранён на этом ПК" : "Выберите JSON-файл голоса Supertonic"; }
+function acceptSettings(settings, revision, before) {
+  const current = formValues(), pendingClears = new Set(clearSecrets), changed = {};
+  if (revision !== editRevision) for (const [key, value] of Object.entries(current)) if (JSON.stringify(value) !== JSON.stringify(before[key])) changed[key] = value;
+  fill(settings);
+  if (revision === editRevision) dirty = false;
+  else {
+    for (const element of $("settingsForm").elements) if (element.name in changed) { if (element.type === "checkbox") element.checked = changed[element.name]; else element.value = element.name === "musicVolume" ? changed[element.name] / 10 : changed[element.name]; }
+    for (const key of pendingClears) if (changed["clear_" + key]) clearSecrets.add(key);
+    dirty = true; providerPanels(); drawPickers();
+  }
 }
 async function save() {
-  const result = await backend("save", formValues());
-  hideScreenPreview();
-  fill(result.settings); dirty = false; $("saveHint").textContent = "Настройки сохранены"; return result;
+  if (saveFlight) { const result = await saveFlight; return dirty ? save() : result; }
+  clearTimeout(autoSaveTimer);
+  const revision = editRevision, values = formValues(); $("saveHint").textContent = "Сохраняем настройки…";
+  const flight = backend("save", values).then(result => { acceptSettings(result.settings, revision, values); $("saveHint").textContent = dirty ? "Есть новые изменения…" : "Настройки сохранены"; return result; });
+  saveFlight = flight;
+  try { return await flight; } finally { if (saveFlight === flight) saveFlight = undefined; if (dirty && revision !== editRevision) scheduleAutoSave(); }
+}
+function scheduleAutoSave() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(async () => {
+    if (!dirty) return;
+    if (busy || saveFlight || document.activeElement?.type === "password") { scheduleAutoSave(); return; }
+    try { await save(); }
+    catch (error) { $("saveHint").textContent = "Не сохранено: " + error.message; }
+  }, 1200);
+}
+async function importSettings(method, params = {}) {
+  if (dirty) await save();
+  const revision = editRevision, before = formValues(), result = await backend(method, params);
+  acceptSettings(result.settings, revision, before); if (dirty) scheduleAutoSave(); return result;
 }
 async function action(button, operation) {
   if (busy) { notice("Дождитесь завершения текущего действия. Вкладки и поля настроек остаются доступны."); return; }
   busy = true; button.disabled = true; notice(); $("saveHint").textContent = "Выполняется действие…";
   try { await operation(); }
-  catch (error) { notice(error.message); }
+  catch (error) { notice(error.message, error.stateError ? "state" : "action"); }
   finally { busy = false; button.disabled = false; $("saveHint").textContent = dirty ? "Есть несохранённые изменения" : "Настройки хранятся на этом ПК"; await refresh(); }
 }
 function render(state) {
@@ -127,6 +159,10 @@ function render(state) {
   $("stop").disabled = !state.connected;
   $("testVoice").disabled = busy || !state.connected;
   $("quickAstra").disabled = busy;
+  $("findVoiceRuntime").disabled = busy;
+  $("customVoiceFile").disabled = busy;
+  $("setupVoice").disabled = busy || state.supertonicSetup?.running;
+  $("voiceSetupStatus").textContent = state.supertonicSetup?.status || "";
   const music = state.music || {};
   $("musicTitle").textContent = music.title || currentMusic?.title || "Трансляция не запущена";
   $("musicArtist").textContent = music.artist || currentMusic?.artist || "";
@@ -229,10 +265,10 @@ function renderDiagnostics(report, state) {
   $("diagnosticFailure").hidden = !report.lastFailure;
   if (report.lastFailure?.at > diagnosticFailureAt) { diagnosticFailureAt = report.lastFailure.at; if (/^(WIN_|MUSIC_)/.test(report.lastFailure.code)) $("diagnostics").open = true; }
   $("diagnosticFailure").textContent = report.lastFailure ? "Последний сбой: [" + report.lastFailure.code + "] " + report.lastFailure.detail.replace(/^\[[A-Z_]+\]\s*/, "") : "";
-  const key = JSON.stringify([checks, busy, state.localSetup?.running, state.whisperSetup?.running, state.musicSetup?.running]);
+  const key = JSON.stringify([checks, busy, state.localSetup?.running, state.whisperSetup?.running, state.musicSetup?.running, state.supertonicSetup?.running]);
   if (key === diagnosticKey) return; diagnosticKey = key;
   $("diagnosticChecks").replaceChildren();
-  const statuses = { ok: "Готово", warning: "Нужна настройка", error: "Ошибка" }, fixes = { setup_local: ["Подготовить Vosk", "localSetup"], setup_whisper: ["Подготовить Whisper", "whisperSetup"], setup_music: ["Подготовить музыку", "musicSetup"] };
+  const statuses = { ok: "Готово", warning: "Нужна настройка", error: "Ошибка" }, fixes = { setup_local: ["Подготовить Vosk", "localSetup"], setup_whisper: ["Подготовить Whisper", "whisperSetup"], setup_music: ["Подготовить музыку", "musicSetup"], setup_voice: ["Подготовить Supertonic", "supertonicSetup"] };
   for (const item of checks) {
     const row = document.createElement("li"), heading = document.createElement("div"), title = document.createElement("strong"), status = document.createElement("span"), detail = document.createElement("p"), code = document.createElement("small");
     row.className = "diagnostic-check"; heading.className = "section-heading"; title.textContent = item.title; status.textContent = statuses[item.result] || "Не проверено"; status.className = "badge"; status.dataset.result = item.result; heading.append(title, status);
@@ -250,7 +286,7 @@ $('diagnosticReport').onclick = () => action($('diagnosticReport'), async () => 
   const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
   const link = document.createElement('a'); link.href = url; link.download = 'VC-Discord-diagnostics.json'; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
 });
-function markDirty() { dirty = true; $("saveHint").textContent = "Есть несохранённые изменения"; }
+function markDirty() { editRevision++; dirty = true; $("saveHint").textContent = "Изменения сохранятся автоматически…"; scheduleAutoSave(); }
 function selectTab(name, focus = true) {
   for (const tab of document.querySelectorAll("[data-tab]")) { const selected = tab.dataset.tab === name; tab.setAttribute("aria-selected", String(selected)); tab.tabIndex = selected ? 0 : -1; $("panel-" + tab.dataset.tab).hidden = !selected; if (selected && focus) tab.focus(); }
 }
@@ -260,6 +296,7 @@ for (const tab of document.querySelectorAll("[data-tab]")) {
 }
 $("settingsForm").oninput = event => { if (event.target.name && event.target.id !== "musicVolume") markDirty(); };
 $("settingsForm").onchange = event => { if (event.target.id === "sttEngine") $("sttUseAstra").checked = false; if (event.target.name && event.target.id !== "musicVolume") markDirty(); providerPanels(); };
+$("settingsForm").addEventListener("focusout", () => { if (dirty) scheduleAutoSave(); });
 $("settingsForm").onsubmit = event => { event.preventDefault(); void action($("save"), save); };
 $("connect").onclick = () => action($("connect"), async () => { if (snapshot?.connected) await backend("disconnect"); else { if (dirty) await save(); await backend("connect"); } });
 $("stop").onclick = () => action($("stop"), () => backend("stop"));
@@ -278,9 +315,16 @@ $("voices").onclick = () => action($("voices"), async () => { const result = awa
 $("models").onclick = () => action($("models"), async () => { if (dirty) await save(); const result = await backend("models"); $("modelNames").replaceChildren(...result.models.map(name => { const option = document.createElement("option"); option.value = name; return option; })); notice("Найдено моделей: " + result.models.length); });
 $("setupLocal").onclick = () => action($("setupLocal"), async () => { if (dirty) await save(); await backend("setup_local"); });
 $("setupMusic").onclick = () => action($("setupMusic"), async () => { await backend("setup_music"); });
-$("astraVoice").onclick = () => action($("astraVoice"), async () => { if (dirty) await save(); const result = await backend("use_astra_voice"); hideScreenPreview(); fill(result.settings); dirty = false; notice("Выбран текущий голос Astra: Supertonic «" + result.voice + "»."); });
-$("astraRecognition").onclick = () => action($("astraRecognition"), async () => { if (dirty) await save(); const result = await backend("use_astra_recognition"); hideScreenPreview(); fill(result.settings); dirty = false; notice("Выбрано распознавание Astra: «" + result.model + "». Бот будет следовать выбору в Astra."); });
-$("astraChat").onclick = () => action($("astraChat"), async () => { if (dirty) await save(); const result = await backend("use_astra_chat_model"); hideScreenPreview(); fill(result.settings); dirty = false; notice(result.keyNotice || "Выбрана модель чата Astra: «" + result.model + "». Адрес и порт взяты из Astra."); if (result.keyNotice) $("llmApiKey").focus(); });
+$("astraVoice").onclick = () => action($("astraVoice"), async () => { const result = await importSettings("use_astra_voice"); notice("Выбран текущий голос Astra: Supertonic «" + (result.voice === "custom" ? "свой голос" : result.voice) + "»."); });
+$("findVoiceRuntime").onclick = () => action($("findVoiceRuntime"), async () => { await importSettings("find_voice_runtime"); notice("Совместимое окружение Supertonic найдено."); });
+$("setupVoice").onclick = () => action($("setupVoice"), () => backend("setup_voice"));
+$("customVoiceFile").onchange = () => action($("customVoiceFile"), async () => {
+  const file = $("customVoiceFile").files[0]; if (!file) return;
+  try { if (file.size > 1500000 || !/\.json$/i.test(file.name)) throw new Error("Выберите JSON-файл голоса размером до 1,5 МБ."); await importSettings("import_custom_voice", { json: await file.text() }); notice("Свой голос сохранён и выбран для Supertonic."); }
+  finally { $("customVoiceFile").value = ""; }
+});
+$("astraRecognition").onclick = () => action($("astraRecognition"), async () => { const result = await importSettings("use_astra_recognition"); notice("Выбрано распознавание Astra: «" + result.model + "». Бот будет следовать выбору в Astra."); });
+$("astraChat").onclick = () => action($("astraChat"), async () => { const result = await importSettings("use_astra_chat_model"); notice(result.keyNotice || "Выбрана модель чата Astra: «" + result.model + "». Адрес и порт взяты из Astra."); if (result.keyNotice) $("llmApiKey").focus(); });
 async function loadConnections() {
   const result = await backend("model_connections"); modelConnections = result.connections;
   const selected = $("llmProviderChoice").value;
@@ -304,7 +348,7 @@ $("quickAstra").onclick = () => action($("quickAstra"), async () => {
   if (dirty) await save(); const imported = [], errors = [];
   for (const [method, label] of [["use_astra_chat_model", "чат"], ["use_astra_recognition", "распознавание"], ["use_astra_voice", "голос"]]) {
     notice("Берём из Astra: " + label + "…");
-    try { const result = await backend(method); fill(result.settings); dirty = false; imported.push(label); }
+    try { await importSettings(method); imported.push(label); }
     catch (error) { errors.push(label + ": " + error.message); }
   }
   hideScreenPreview(); notice((imported.length ? "Взяты из Astra: " + imported.join(", ") + ". Ключи провайдеров вводятся отдельно один раз." : "") + (errors.length ? "\n" + errors.join("\n") : ""));
@@ -315,7 +359,7 @@ async function musicJob(method, value = {}) {
   while (Date.now() < deadline) {
     const state = await backend("state"), job = state.music?.job; render(state);
     if (job?.id !== started.jobId) throw new Error("Музыкальное действие заменено другим запросом.");
-    if (job.status === "failed") throw new Error(job.error || "Не удалось подготовить музыку.");
+    if (job.status === "failed") { const error = new Error(job.error || "Не удалось подготовить музыку."); error.stateError = true; throw error; }
     if (job.status === "done") return job.result;
     await new Promise(resolve => setTimeout(resolve, 500));
   }

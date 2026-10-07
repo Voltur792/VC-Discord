@@ -8,9 +8,10 @@ import { astraRecognition, chatSettings } from "./astra-settings";
 import { findMusicFFmpeg } from "./music-setup";
 import { runWindows, WindowsServiceError, windowsFailure } from "./process";
 import { powershellPath, pythonPath } from "./runtime";
+import { findVoicePython } from "./voice-runtime";
 
 type Result = "ok" | "warning" | "error";
-interface Check { id: string; title: string; result: Result; code: string; detail: string; fix?: "setup_local" | "setup_whisper" | "setup_music" }
+interface Check { id: string; title: string; result: Result; code: string; detail: string; fix?: "setup_local" | "setup_whisper" | "setup_music" | "setup_voice" }
 interface Probe { ok: boolean; output: string; code: string }
 function probe(executable: string, args: string[], timeout = 7000): Promise<Probe> {
   return new Promise(resolve => {
@@ -139,7 +140,12 @@ export class Diagnostics {
   }
   private async voice(s: Settings): Promise<Check[]> {
     if (s.ttsEngine === "api") return [{ id: "voice", title: "API озвучки", result: s.ttsModel ? "ok" : "warning", code: "TTS_CONFIG", detail: "Проверьте адрес, модель и ключ озвучки. Синтез проверяется кнопкой «Проверить голос» после подключения бота." }];
-    if (s.ttsEngine === "supertonic") return [await this.python("Python и голос Astra", s.ttsPython, "supertonic"), { id: "voice-model", title: "Папка модели голоса Astra", result: !!s.supertonicModelPath && await present(s.supertonicModelPath, "directory") ? "ok" : "error", code: "TTS_MODEL_FOLDER", detail: "Для Supertonic нужна скачанная модель Astra. Нажмите «Взять голос Astra»; полноценный синтез проверяется кнопкой «Проверить голос»." }];
+    if (s.ttsEngine === "supertonic") {
+      let runtime: Check;
+      try { await findVoicePython(s.ttsPython); runtime = { id: "supertonic", title: "Python и голос Astra", result: "ok", code: "VOICE_RUNTIME_FOUND", detail: "Совместимое окружение найдено автоматически. Изменять PATH не требуется." }; }
+      catch { runtime = { id: "supertonic", title: "Python и голос Astra", result: "error", code: "VOICE_RUNTIME_MISSING", detail: "Не найдено окружение с Supertonic, numpy и onnxruntime. Нажмите «Подготовить Supertonic» или укажите готовый Python.", fix: "setup_voice" }; }
+      return [runtime, { id: "voice-model", title: "Папка модели голоса Astra", result: !!s.supertonicModelPath && await present(join(s.supertonicModelPath, "onnx", "vocoder.onnx"), "file") ? "ok" : "error", code: "TTS_MODEL_FOLDER", detail: "Для Supertonic нужна скачанная модель Astra. Нажмите «Взять голос Astra»; полноценный синтез проверяется кнопкой «Проверить голос»." }];
+    }
     // Never synthesize/play audio during automatic diagnostics.
     try {
       const voices: any = JSON.parse((await runWindows({ action: "voices" }, AbortSignal.timeout(10000))).toString("utf8"));

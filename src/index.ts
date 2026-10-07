@@ -14,7 +14,7 @@ const bridge = new VoiceBridge();
 const call = (operation: (value: unknown) => unknown, name = "ui") => async (value: unknown, ctx: PluginContext) => {
   void ctx.log("info", `Discord voice UI action started: ${name}`).catch(() => {});
   try { const result = await operation(value); void ctx.log("info", `Discord voice UI action completed: ${name}`).catch(() => {}); return result; }
-  catch (error) { bridge.recordError(error); return { ok: false, error: bridge.errorMessage(error) }; }
+  catch (error) { bridge.recordError(error, name); return { ok: false, error: bridge.errorMessage(error) }; }
 };
 
 export const app = plugin({
@@ -29,14 +29,14 @@ export const app = plugin({
       model_connections: call(() => bridge.modelConnections()),
       diagnose: call(() => bridge.diagnose(), "diagnose"),
       diagnostic_report: call(() => bridge.diagnosticReport(), "diagnostic_report"),
-      music_current: call(() => bridge.musicCurrent()),
-      music_search: call(value => bridge.musicSearch(value)),
-      music_playlists: call(value => bridge.musicPlaylists(value)),
-      music_next: call(value => bridge.musicNext(value)),
-      music_play: call(value => bridge.musicPlay(value)),
-      music_pause: call(() => bridge.musicPause()),
-      music_stop: call(() => bridge.musicStop()),
-      music_volume: call(value => bridge.musicVolume(value)),
+      music_current: call(() => bridge.musicCurrent(), "music_current"),
+      music_search: call(value => bridge.musicSearch(value), "music_search"),
+      music_playlists: call(value => bridge.musicPlaylists(value), "music_playlists"),
+      music_next: call(value => bridge.musicNext(value), "music_next"),
+      music_play: call(value => bridge.musicPlay(value), "music_play"),
+      music_pause: call(() => bridge.musicPause(), "music_pause"),
+      music_stop: call(() => bridge.musicStop(), "music_stop"),
+      music_volume: call(value => bridge.musicVolume(value), "music_volume"),
       setup_music: call(() => bridge.setupMusic(), "setup_music"),
       save: call(value => bridge.save(value), "save"),
       connect: call(() => bridge.connect(), "connect"),
@@ -48,6 +48,9 @@ export const app = plugin({
       models: call(value => bridge.models(value), "models"),
       voices: call(() => bridge.voices(), "voices"),
       use_astra_voice: call(() => bridge.useAstraVoice()),
+      find_voice_runtime: call(() => bridge.findVoiceRuntime(), "find_voice_runtime"),
+      setup_voice: call(() => bridge.setupVoice(), "setup_voice"),
+      import_custom_voice: call(value => bridge.importCustomVoice(value), "import_custom_voice"),
       use_astra_recognition: call(() => bridge.useAstraRecognition()),
       use_astra_chat_model: call(() => bridge.useAstraChatModel()),
       setup_whisper: call(() => bridge.setupWhisper(), "setup_whisper"),

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { findVoicePython } from "./voice-runtime";
+import { importVoiceJson, readVoiceJson } from "./custom-voice";
 import { readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import type { PluginContext } from "astra-plugin-sdk";
@@ -6,7 +8,7 @@ import { SettingsStore, dataDir, defaults, normalizeSettings, publicSettings, sa
 import { authorized, CommandGate, isDisconnectUtterance, routeUtterance, type Speaker } from "./access";
 import { Providers, modelNames, publicChat, type ChatMessage } from "./providers";
 import { VoiceTransport } from "./voice";
-import { LocalSetup, WhisperSetup } from "./setup";
+import { LocalSetup, WhisperSetup, SupertonicSetup } from "./setup";
 import { astraRecognition, astraChat, astraConnections, astraPersonality, chatSettings } from "./astra-settings";
 import { WhisperWorker } from "./whisper";
 import { discoverDiscord } from "./discord-setup";
@@ -32,13 +34,14 @@ export class VoiceBridge {
   private providers = new Providers();
   private setup = new LocalSetup();
   private whisperSetup = new WhisperSetup();
+  private supertonicSetup = new SupertonicSetup();
   private musicSetup = new MusicSetup();
   private diagnostics = new Diagnostics(() => this.settings);
   diagnose(): { ok: true } { return this.diagnostics.start(); }
   diagnosticReport(): unknown { return this.diagnostics.report(); }
-  recordError(error: unknown): void {
+  recordError(error: unknown, action = "ui"): void {
     this.diagnostics.record(error);
-    this.note(this.errorMessage(error), true);
+    this.note(this.errorMessage(error), true, action.startsWith("music_") ? "music" : action === "save" ? "settings" : undefined);
     const code = error instanceof WindowsServiceError ? `${error.code}; action=${error.action}; exit=${error.exitCode ?? "unknown"}` : "UI_ACTION_FAILED";
     void this.ctx?.log("warn", `VC-Discord: ${code}`).catch(() => {});
   }
@@ -46,12 +49,13 @@ export class VoiceBridge {
   private closing = false;
   private ctx?: PluginContext;
   private queue: Job[] = [];
+  private queueNoticeAt = 0;
   private processing = false;
   private controller?: AbortController;
   private phase = "offline";
   private status = "Готов к настройке";
   private lastError = "";
-  private lastErrorSource?: "voice_receive";
+  private lastErrorSource?: "voice_receive" | "music" | "settings";
   private loadError = "";
   private configSaving = false;
   private history: ChatMessage[] = [];
@@ -85,7 +89,9 @@ export class VoiceBridge {
     () => this.cancelWaiting(),
   );
   private readonly gate = new CommandGate(() => this.settings, speaker => !this.configSaving && this.transport.present(speaker), text => this.nativeCommand(text));
-  private readonly music = new DiscordMusic(this.transport, () => this.settings, (text, error) => this.note(text, error), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); });
+  private readonly music = new DiscordMusic(this.transport, () => this.settings, (text, error) => this.note(text, error, "music"), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); }, () => {
+    if (this.lastErrorSource === "music") { this.lastError = ""; this.lastErrorSource = undefined; this.note("Связь с музыкальным сервисом восстановлена."); }
+  });
   private readonly moderation = new VoiceModeration(() => this.settings, this.transport, () => this.configSaving, (text, error) => this.note(text, error));
   musicCurrent(): Promise<unknown> { return this.music.current(); }
   musicSearch(value: unknown): unknown { return this.music.beginJob("search", value); }
@@ -103,7 +109,7 @@ export class VoiceBridge {
     catch (error) { this.loadError = safeError(error); this.note(this.loadError, true); this.diagnostics.record(error); }
     this.diagnostics.start();
   }
-  private note(text: string, error = false, source?: "voice_receive"): void {
+  private note(text: string, error = false, source?: "voice_receive" | "music" | "settings"): void {
     this.updates.unshift({ at: Date.now(), text: safeError(new Error(text), this.settings), error });
     this.updates = this.updates.slice(0, 12);
     if (error) { this.lastError = this.updates[0].text; this.lastErrorSource = source; if (/^\[MUSIC_[A-Z_]+\]/.test(text)) this.diagnostics.record(new Error(text)); else this.diagnostics.start(false); }
@@ -120,6 +126,7 @@ export class VoiceBridge {
       lastHeard: this.lastHeard, lastAnswer: this.lastAnswer, updates: this.updates,
       localSetup: { running: this.setup.running, status: this.setup.status },
       whisperSetup: { running: this.whisperSetup.running, status: this.whisperSetup.status },
+      supertonicSetup: { running: this.supertonicSetup.running, status: this.supertonicSetup.status },
       screen: { active: this.screenSharing, lastSentAt: this.lastScreenAt, ...this.browserScreen.status() },
       music: this.music.state(),
       moderation: this.moderation.state(),
@@ -163,14 +170,29 @@ export class VoiceBridge {
           value = { ...value as Record<string, unknown>, llmKeyOrigin: new URL(candidate.llmBaseUrl).origin };
         }
       }
-      const candidate = normalizeSettings(value, this.settings); validateSettings(candidate);
+      const effective = value && typeof value === "object" ? { ...value as Record<string, unknown> } : {};
+      for (const key of ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "googleApiKey"]) {
+        if (effective[key] === "" || effective[key] === undefined) delete effective[key];
+        if (effective[`clear_${key}`] === true) effective[key] = "";
+      }
+      const candidate = normalizeSettings(effective, this.settings); validateSettings(candidate);
+      const previous = this.settings;
+      const changed = (keys: (keyof Settings)[]) => keys.some(key => JSON.stringify(previous[key]) !== JSON.stringify(candidate[key]));
+      const connectionChanged = changed(["botToken", "guildId", "channelId"]);
+      const accessChanged = changed(["commandsEnabled", "allowedUserIds", "confirmCommands", "commandPhrase", "moderationEnabled", "moderatorUserIds", "confirmModeration", "moderationUserAliases", "moderationChannelAliases", "googleSpeechConfirmed"]);
+      const voiceChanged = changed(["ttsEngine", "ttsPython", "supertonicModelPath", "supertonicVoice", "supertonicCustomVoicePath", "supertonicSpeed", "windowsVoice", "windowsRate", "ttsBaseUrl", "ttsModel", "ttsVoice", "ttsApiKey", "sttEngine", "sttBaseUrl", "sttModel", "sttApiKey", "sttPython", "whisperPython", "whisperModelPath", "voskModelPath", "sttUseAstra", "googleApiKey"]);
+      const modelChanged = changed(["llmBaseUrl", "llmModel", "llmProviderId", "llmUseAstra", "llmUseAstraPersonality", "llmApiKey", "screenVisionConfirmed", "screenDisplay"]);
       this.configSaving = true;
-      this.transport.invalidate();
       try {
-        const previous = this.settings;
         this.settings = await this.store.save(value);
-        if (previous.botToken !== this.settings.botToken || previous.channelId !== this.settings.channelId || previous.guildId !== this.settings.guildId) this.disconnect();
-        this.providers.stop(); this.loadError = ""; this.lastError = ""; this.lastErrorSource = undefined; this.note("Настройки сохранены."); this.diagnostics.start();
+        if (connectionChanged) this.disconnect();
+        else if (accessChanged) this.transport.invalidate();
+        if (voiceChanged || modelChanged) { this.controller?.abort(); this.queue = []; this.transport.stopPlayback(); }
+        if (voiceChanged) this.providers.stop();
+        if (modelChanged) { this.history = []; this.browserScreen.stop(); this.screenSharing = false; this.screenEpoch++; this.lastScreenAt = 0; }
+        this.loadError = "";
+        if (this.lastErrorSource === "settings") { this.lastError = ""; this.lastErrorSource = undefined; }
+        if (connectionChanged || accessChanged || voiceChanged || modelChanged) { this.lastError = ""; this.lastErrorSource = undefined; this.note("Настройки сохранены."); this.diagnostics.start(); }
         return { ok: true, settings: publicSettings(this.settings) };
       } finally { this.configSaving = false; }
     });
@@ -198,7 +220,12 @@ export class VoiceBridge {
   clearHistory(): { ok: true } { this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.history = []; this.lastHeard = ""; this.lastAnswer = ""; this.note("История общего разговора очищена."); return { ok: true }; }
   private enqueue(speaker: Speaker, pcm: Buffer): void {
     if (!this.transport.present(speaker) || this.configSaving) return;
-    if (this.queue.length >= 6) { this.note("Очередь заполнена. Повторите реплику после ответа."); return; }
+    const now = Date.now();
+    this.queue = this.queue.filter(job => now - job.createdAt <= 30000 && this.transport.present(job.speaker));
+    if (this.queue.length >= 6) {
+      this.queue.splice(0, this.queue.length - 3);
+      if (now - this.queueNoticeAt >= 10000) { this.queueNoticeAt = now; this.note("Очередь обновлена: старые ожидающие реплики удалены, продолжаю с новыми."); }
+    }
     this.queue.push({ speaker, pcm, createdAt: Date.now() });
     void this.drain();
   }
@@ -207,7 +234,7 @@ export class VoiceBridge {
     try {
       while (this.queue.length) {
         const job = this.queue.shift()!;
-        if (Date.now() - job.createdAt > 60_000 || !this.transport.present(job.speaker)) continue;
+        if (Date.now() - job.createdAt > 30_000 || !this.transport.present(job.speaker)) continue;
         const controller = new AbortController(); this.controller = controller;
         try {
           this.phase = "recognizing";
@@ -243,7 +270,7 @@ export class VoiceBridge {
           if (route.kind === "ignore") continue;
           if (route.kind === "deny") { reply = route.text || "Доступ запрещён."; this.note("Запрос управления ПК отклонён."); }
           const musicReply = route.kind === "command" || route.kind === "public" ? await this.music.voice(route.text,
-            () => this.transport.present(job.speaker) && this.settings.allowedUserIds.includes(job.speaker.userId), controller.signal) : undefined;
+            () => this.transport.present(job.speaker) && this.settings.allowedUserIds.includes(job.speaker.userId), controller.signal).catch(error => { if (error instanceof Error) Object.defineProperty(error, "musicSource", { value: true }); throw error; }) : undefined;
           if (musicReply !== undefined) reply = musicReply;
           if (route.kind === "command" && musicReply === undefined) reply = await this.command(job.speaker, route.text);
           if (route.kind === "public" && musicReply === undefined) {
@@ -275,7 +302,7 @@ export class VoiceBridge {
           if (!controller.signal.aborted && this.transport.present(job.speaker) && reply) {
             this.lastAnswer = reply; await this.say(reply, controller.signal);
           }
-        } catch (error) { if (!controller.signal.aborted) this.note(safeError(error, this.settings), true); }
+        } catch (error) { if (!controller.signal.aborted) this.note(safeError(error, this.settings), true, (error as any)?.musicSource ? "music" : undefined); }
         finally { if (this.controller === controller) this.controller = undefined; }
       }
     } finally { this.processing = false; this.phase = this.transport.connected ? "listening" : "offline"; }
@@ -425,20 +452,39 @@ export class VoiceBridge {
     let voice: any;
     try { voice = JSON.parse(await readFile(join(root, "config", "settings.json"), "utf8")).voice; }
     catch { throw new Error("Не удалось прочитать настройки голоса Astra."); }
+    if (voice?.tts_provider === "vox") throw new Error("Vox пока недоступен для Discord: API Astra не возвращает его аудио. Выберите Supertonic в Astra или в этом плагине.");
     if (voice?.tts_provider !== "supertonic") throw new Error("Сейчас в Astra выбран другой движок. Автоматическое подключение поддерживает Supertonic 3.");
     const model = join(root, "data", "models", "supertonic-3");
     const selected = voice.voices?.supertonic;
-    const name = typeof selected === "string" && /^[MF][1-5]$/.test(selected) ? selected : "F4";
-    try { await access(join(model, "voice_styles", name + ".json")); await access(join(model, "onnx", "vocoder.onnx")); }
+    const id = typeof selected === "string" && /^(?:[MF][1-5]|custom_[a-zA-Z0-9_-]{1,100})$/.test(selected) ? selected : "F4";
+    const name = id.startsWith("custom_") ? "custom" : id;
+    let customPath = "";
+    try { await access(join(model, "onnx", "vocoder.onnx")); }
     catch { throw new Error("Модель Supertonic ещё не скачана в Astra."); }
-    let python = this.settings.ttsPython;
-    const prepared = join(__dirname, "..", ".runtime", "supertonic", "Scripts", "python.exe");
-    if (python === "python") { try { await access(prepared); python = prepared; } catch {} }
-    const candidate = normalizeSettings({ ttsEngine: "supertonic", ttsPython: python, supertonicModelPath: model, supertonicVoice: name, supertonicSpeed: Number(voice.tts_speed) || 1.1 }, this.settings);
+    try { await access(join(model, "voice_styles", id + ".json")); }
+    catch { throw new Error("Файл выбранного голоса Astra не найден. Загрузите его JSON кнопкой «Загрузить свой голос»."); }
+    if (name === "custom") customPath = await importVoiceJson(await readVoiceJson(join(model, "voice_styles", id + ".json")));
+    const python = await findVoicePython(this.settings.ttsPython);
+    const candidate = normalizeSettings({ ttsEngine: "supertonic", ttsPython: python, supertonicModelPath: model, supertonicVoice: name, supertonicCustomVoicePath: customPath, supertonicSpeed: Number(voice.tts_speed) || 1.1 }, this.settings);
     // Check that the existing model can synthesize before saving the choice.
     await this.providers.speak(candidate, "Проверка голоса Астры.", AbortSignal.timeout(65000));
-    await this.save({ ttsEngine: candidate.ttsEngine, ttsPython: candidate.ttsPython, supertonicModelPath: candidate.supertonicModelPath, supertonicVoice: candidate.supertonicVoice, supertonicSpeed: candidate.supertonicSpeed });
+    await this.save({ ttsEngine: candidate.ttsEngine, ttsPython: candidate.ttsPython, supertonicModelPath: candidate.supertonicModelPath, supertonicVoice: candidate.supertonicVoice, supertonicCustomVoicePath: candidate.supertonicCustomVoicePath, supertonicSpeed: candidate.supertonicSpeed });
     return { ok: true, settings: publicSettings(this.settings), voice: name };
+  }
+  async findVoiceRuntime(): Promise<unknown> {
+    const python = await findVoicePython(this.settings.ttsPython);
+    await this.save({ ttsPython: python }); return { ok: true, settings: publicSettings(this.settings) };
+  }
+  setupVoice(): { ok: true } {
+    this.supertonicSetup.start(async python => { if (!this.closing) { await this.save({ ttsPython: python }); this.diagnostics.start(); } });
+    return { ok: true };
+  }
+  async importCustomVoice(value: unknown): Promise<unknown> {
+    const text = (value as { json?: unknown })?.json;
+    if (typeof text !== "string") throw new Error("Выберите JSON-файл голоса.");
+    const path = await importVoiceJson(text);
+    await this.save({ supertonicVoice: "custom", supertonicCustomVoicePath: path });
+    return { ok: true, settings: publicSettings(this.settings) };
   }
   async testVoice(): Promise<unknown> {
     if (!this.transport.connected || this.processing) throw new Error("Подключите бота и дождитесь окончания текущего ответа.");
@@ -446,5 +492,5 @@ export class VoiceBridge {
     try { await this.say("Привет! Я Астра. Голосовое соединение с Discord работает.", controller.signal); return { ok: true }; }
     finally { if (this.controller === controller) this.controller = undefined; this.phase = this.transport.connected ? "listening" : "offline"; }
   }
-  shutdown(): void { this.closing = true; this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.musicSetup.stop(); this.disconnect(); }
+  shutdown(): void { this.closing = true; this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.supertonicSetup.stop(); this.musicSetup.stop(); this.disconnect(); }
 }

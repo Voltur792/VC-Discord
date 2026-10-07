@@ -28,13 +28,20 @@ def main():
         try:
             value = json.loads(line)
             voice = value.get("voice", "F4")
-            if voice not in {f"{kind}{i}" for kind in "MF" for i in range(1, 6)}:
+            if voice not in {f"{kind}{i}" for kind in "MF" for i in range(1, 6)} | {"custom"}:
                 raise ValueError("Unknown voice")
-            if voice not in styles:
-                styles[voice] = engine.get_voice_style(voice_name=voice)
+            key = str(value.get("voice_path", "")) if voice == "custom" else voice
+            if key not in styles:
+                if voice == "custom":
+                    path = Path(key)
+                    if path.suffix.lower() != ".json" or path.stat().st_size > 1_500_000:
+                        raise ValueError("Invalid voice profile")
+                    styles[key] = engine.get_voice_style_from_path(path)
+                else:
+                    styles[key] = engine.get_voice_style(voice_name=voice)
             with contextlib.redirect_stdout(sys.stderr):
                 audio, _ = engine.synthesize(text=str(value.get("text", ""))[:1000],
-                    voice_style=styles[voice], lang="ru", speed=max(.7, min(2., float(value.get("speed", 1.1)))),
+                    voice_style=styles[key], lang="ru", speed=max(.7, min(2., float(value.get("speed", 1.1)))),
                     total_steps=5, max_chunk_length=180, verbose=False)
             pcm = (np.clip(audio.reshape(-1), -1, 1) * 32767).astype("<i2").tobytes()
             if len(pcm) > 8_000_000:

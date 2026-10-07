@@ -62,3 +62,26 @@ export class WhisperSetup {
     if (child?.pid) execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
   }
 }
+
+export class SupertonicSetup {
+  running = false;
+  status = "";
+  private child?: ChildProcessWithoutNullStreams;
+  start(complete: (python: string) => Promise<void>): void {
+    if (this.running) throw new Error("Подготовка Supertonic уже выполняется.");
+    this.running = true; this.status = "Подготовка голоса Supertonic…";
+    const child = spawn(pythonPath(), ["-u", join(__dirname, "assets", "setup_supertonic.py"), dataDir], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    this.child = child; child.stdin.end(); child.stderr.resume(); let prepared = "";
+    const timer = setTimeout(() => { this.stop(); this.status = "Подготовка Supertonic не завершилась за 10 минут. Повторите попытку."; }, 600000);
+    createInterface({ input: child.stdout }).on("line", line => {
+      try { const value = JSON.parse(line); if (value.status || value.error) this.status = String(value.status || value.error).slice(0, 200); if (value.ready) prepared = String(value.python || ""); } catch {}
+    });
+    child.on("error", () => { this.status = "Не удалось запустить Python. Установите Python или выберите готовое окружение."; });
+    child.on("close", code => {
+      clearTimeout(timer); if (this.child !== child) return; this.child = undefined;
+      if (code === 0 && prepared) complete(prepared).then(() => this.status = "Supertonic готов. Нажмите «Взять текущий голос Astra» или выберите папку модели.").catch(() => this.status = "Окружение создано, но настройки не сохранены. Нажмите «Найти окружение».").finally(() => this.running = false);
+      else { this.running = false; if (!this.status.startsWith("Не удалось")) this.status = "Не удалось подготовить Supertonic. Проверьте Python и доступ к PyPI."; }
+    });
+  }
+  stop(): void { const child = this.child; this.child = undefined; this.running = false; if (child?.pid) execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {}); }
+}

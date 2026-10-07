@@ -59,7 +59,8 @@ export class DiscordMusic {
   private volumeRevision = 0;
   private readonly volumeInstance = randomBytes(16).toString("hex");
   private syncFinished: Promise<void> = Promise.resolve();
-  constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void, private trace: (text: string) => void = () => {}) {}
+  constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void, private trace: (text: string) => void = () => {}, private onHealthy: () => void = () => {}) {}
+  private healthy(): void { this.error = ""; this.onHealthy(); }
   state(): Record<string, unknown> { return { following: this.following, loading: this.loading || this.transitioning || this.recovering, recovering: this.recovering, recoveryAttempts: this.recoveryAttempts, paused: this.paused, title: this.title, artist: this.artist, error: this.error, playing: !!this.child && !this.paused && !this.recovering, volume: this.selectedVolume ?? this.settings().musicVolume, volumeRevision: this.volumeRevision, volumeInstance: this.volumeInstance, audio: this.transport.musicStats(), job: this.job }; }
   beginJob(method: "search" | "playlists" | "play" | "next", value: unknown = {}): unknown {
     if (method === "next" || method === "play") this.trace(`music_button action=${method}`);
@@ -81,9 +82,19 @@ export class DiscordMusic {
     const query = String(input?.query || "").trim().slice(0, 200);
     if (!query) throw new Error("Введите название трека или исполнителя.");
     this.service = input?.service === "vk" ? "vk" : "yandex";
-    return musicCall("search", { service: this.service, query, limit: 10 });
+    const result = await musicCall("search", { service: this.service, query, limit: 10 }); this.healthy(); return result;
   }
-  playlists(value: unknown): Promise<any> { this.service = (value as any)?.service === "vk" ? "vk" : "yandex"; return musicCall("discord_playlists", { service: this.service }); }
+  async playlists(value: unknown): Promise<any> { this.service = (value as any)?.service === "vk" ? "vk" : "yandex"; const result = await musicCall("discord_playlists", { service: this.service }); this.healthy(); return result; }
+  async like(): Promise<string> {
+    if (!this.following || !this.session || this.revision < 0 || this.recovering || this.transitioning) return "Сначала включите песню в Discord и дождитесь загрузки.";
+    if (this.bridgeVersion < 5) return "Для лайков обновите Astra Music до версии 1.1.8 и перезапустите оба плагина.";
+    const epoch = this.epoch;
+    const result = await musicCall("discord_like", { session: this.session, revision: this.revision }, this.controller?.signal);
+    if (epoch !== this.epoch || result.cancelled) return "Песня изменилась; повторите команду лайка.";
+    if (result.unsupported) return "Лайк доступен только для Яндекс Музыки.";
+    if (result.liked !== true) throw new Error("Astra Music не подтвердила сохранение лайка.");
+    this.healthy(); return "Песня добавлена в понравившиеся Яндекс Музыки.";
+  }
   async play(value?: unknown): Promise<unknown> {
     if (!this.transport.connected) throw new Error("Подключите бота к голосовому каналу.");
     this.stop();
@@ -219,10 +230,12 @@ export class DiscordMusic {
   async voice(text: string, allowed: () => boolean, signal: AbortSignal): Promise<string | undefined> {
     const phrase = text.toLocaleLowerCase("ru").replace(/ё/g, "е").replace(/[.,!?;:]/g, " ").trim()
       .replace(/^(?:астра|астр|остра)\s+/, "").replace(/\s+/g, " ");
-    const control = /^(?:пауза(?: музыки)?|останови музыку|выключи музыку|продолжи музыку|возобнови музыку|следующ(?:ий|ая) (?:трек|песня)|предыдущ(?:ий|ая) (?:трек|песня)|(?:сделай |музыку )?(?:громче|тише)(?: музыку)?|(?:громкость|громкость музыки|установи громкость|сделай громкость|сделай громкость музыки) .+|(?:включи|поставь|запусти) (?:музыку|музыку в дискорде|мою волну|моя волна|мои треки (?:вк|vk)|плейлист .+|(?:песню|трек|музыку) .+)|найди (?:песню|трек|музыку) .+)$/u.test(phrase);
+    const likeRequest = /^(?:лайк|лайкни(?: (?:песню|трек|эту песню|этот трек|текущую песню|текущий трек))?|поставь лайк(?: (?:песне|треку|песню|трек))?|добавь (?:песню|трек|эту песню|этот трек) в (?:понравившиеся|избранное)|мне нравится (?:эта песня|этот трек))$/u.test(phrase);
+    const control = likeRequest || /^(?:пауза(?: музыки)?|останови музыку|выключи музыку|продолжи музыку|возобнови музыку|следующ(?:ий|ая) (?:трек|песня)|предыдущ(?:ий|ая) (?:трек|песня)|(?:сделай |музыку )?(?:громче|тише)(?: музыку)?|(?:громкость|громкость музыки|установи громкость|сделай громкость|сделай громкость музыки) .+|(?:включи|поставь|запусти) (?:музыку|музыку в дискорде|мою волну|моя волна|мои треки (?:вк|vk)|плейлист .+|(?:песню|трек|музыку) .+)|найди (?:песню|трек|музыку) .+)$/u.test(phrase);
     if (!control) return undefined;
     if (!allowed()) return "У этого аккаунта нет доступа к управлению музыкой.";
     signal.throwIfAborted();
+    if (likeRequest) return this.like();
     if ((this.loading || this.transitioning || this.recovering || this.job?.status === "loading") && phrase !== "выключи музыку" && phrase !== "останови музыку") return "Дождитесь завершения музыкального действия.";
     if (/^пауза/u.test(phrase)) { this.setPaused(true); return "Музыка на паузе."; }
     if (phrase === "выключи музыку" || phrase === "останови музыку") { this.stop(); return "Музыка остановлена."; }
@@ -358,6 +371,7 @@ export class DiscordMusic {
         if (epoch !== this.epoch || this.child !== child) return;
         this.transport.startMusic(pcm, this.selectedVolume ?? this.settings().musicVolume);
         this.decoderAttached = true;
+        this.healthy();
       }
       this.transport.pauseMusic(this.paused);
       this.transport.musicPresence(this.title, this.artist, this.service, this.paused);

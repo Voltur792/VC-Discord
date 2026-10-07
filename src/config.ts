@@ -16,7 +16,7 @@ export interface Settings {
   whisperModelPath: string; whisperPython: string; sttUseAstra: boolean;
   sttPython: string; voskModelPath: string; language: string;
   ttsEngine: "windows" | "api" | "supertonic"; windowsVoice: string; windowsRate: number;
-  ttsPython: string; supertonicModelPath: string; supertonicVoice: string; supertonicSpeed: number;
+  ttsPython: string; supertonicModelPath: string; supertonicVoice: string; supertonicSpeed: number; supertonicCustomVoicePath: string;
   ttsBaseUrl: string; ttsApiKey: string; ttsModel: string; ttsVoice: string;
   musicVolume: number; musicFFmpeg: string;
   moderationEnabled: boolean; confirmModeration: boolean; moderatorUserIds: string[];
@@ -34,7 +34,7 @@ export const defaults: Settings = {
   whisperModelPath: "", whisperPython: "python", sttUseAstra: false,
   googleSpeechConfirmed: false, googleApiKey: "",
   ttsEngine: "windows", windowsVoice: "", windowsRate: 0,
-  ttsPython: "python", supertonicModelPath: "", supertonicVoice: "F4", supertonicSpeed: 1.1,
+  ttsPython: "python", supertonicModelPath: "", supertonicVoice: "F4", supertonicSpeed: 1.1, supertonicCustomVoicePath: "",
   ttsBaseUrl: "https://api.openai.com/v1", ttsApiKey: "", ttsModel: "tts-1", ttsVoice: "alloy",
   musicVolume: 50, musicFFmpeg: "",
   moderationEnabled: false, confirmModeration: true, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
@@ -85,7 +85,8 @@ export function validateSettings(s: Settings): void {
     const lines = aliases.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     if (lines.length > 100 || lines.some(line => !/^\d{17,20}\s*=\s*[^=]+$/u.test(line) || line.length > 300)) throw new Error("Голосовые имена: одна строка «Discord ID = имя, другое имя», до 100 строк и 300 символов в строке.");
   }
-  if (s.ttsEngine === "supertonic" && !/^[MF][1-5]$/.test(s.supertonicVoice)) throw new Error("Выберите голос Supertonic F1–F5 или M1–M5.");
+  if (s.ttsEngine === "supertonic" && !/^(?:[MF][1-5]|custom)$/.test(s.supertonicVoice)) throw new Error("Выберите голос Supertonic F1–F5, M1–M5 или свой JSON.");
+  if (s.ttsEngine === "supertonic" && s.supertonicVoice === "custom" && !s.supertonicCustomVoicePath) throw new Error("Загрузите JSON собственного голоса.");
   for (const url of [s.llmBaseUrl, s.sttBaseUrl, s.ttsBaseUrl]) apiUrl(url, "");
 }
 export function apiUrl(base: string, suffix: string): string {
