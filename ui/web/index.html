@@ -21,7 +21,8 @@
     <summary>Диагностика <span id="diagnosticSummary" class="muted" role="status" aria-live="polite">Проверяем компоненты…</span></summary>
     <div class="diagnostic-body">
       <p class="help">Проверка запускается автоматически при включении плагина и после ошибок. Проверяются сохранённые настройки. Пакеты и программы устанавливаются только кнопками подготовки.</p>
-      <div class="actions"><button id="diagnose" type="button">Проверить ещё раз</button><button id="diagnosticReport" type="button" disabled>Скачать отчёт</button></div>
+      <div class="actions"><button id="diagnose" type="button">Проверить ещё раз</button><button id="diagnosticReport" type="button" disabled>Скачать отчёт</button><button id="diagnosticFolder" type="button" hidden>Открыть папку отчёта</button></div>
+      <p id="diagnosticSavedPath" class="help" role="status" hidden></p>
       <p id="diagnosticFailure" class="help" hidden></p>
       <ul id="diagnosticChecks" class="diagnostic-checks" aria-label="Результаты диагностики" aria-busy="true"></ul>
       <p class="help">Отчёт содержит версии программ, результаты проверок и код последней ошибки. Ключи, токен бота, речь, история и пути к личным файлам в него не включаются.</p>
@@ -123,6 +124,6 @@
   </div>
   <footer class="bottom-note">Бот работает, пока запущена Astra. «Использовать всё из Astra» выбирает её чат, распознавание и доступный голос; ключи провайдеров вводятся отдельно один раз.</footer>
 </main>
-  <script src="app.js?v=25"></script>
+  <script src="app.js?v=26"></script>
 </body>
 </html>

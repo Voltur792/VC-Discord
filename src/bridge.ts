@@ -18,6 +18,7 @@ import { MusicSetup } from "./music-setup";
 import { Diagnostics } from "./diagnostics";
 import { WindowsServiceError } from "./process";
 import { VoiceModeration } from "./moderation";
+import { ReportExport } from "./report-export";
 
 interface Job { speaker: Speaker; pcm: Buffer; createdAt: number }
 interface Pending { id: string; speaker: Speaker; command: string; expiresAt: number }
@@ -37,8 +38,11 @@ export class VoiceBridge {
   private supertonicSetup = new SupertonicSetup();
   private musicSetup = new MusicSetup();
   private diagnostics = new Diagnostics(() => this.settings);
+  private reportExport = new ReportExport();
   diagnose(): { ok: true } { return this.diagnostics.start(); }
   diagnosticReport(): unknown { return this.diagnostics.report(); }
+  saveDiagnosticReport(): Promise<unknown> { return this.reportExport.save(this.diagnostics.report()); }
+  openDiagnosticFolder(): Promise<unknown> { return this.reportExport.openFolder(); }
   recordError(error: unknown, action = "ui"): void {
     this.diagnostics.record(error);
     this.note(this.errorMessage(error), true, action.startsWith("music_") ? "music" : action === "save" ? "settings" : undefined);

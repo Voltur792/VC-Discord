@@ -260,7 +260,8 @@ function renderDiagnostics(report, state) {
   const checks = report.checks || [], errors = checks.filter(v => v.result === "error").length, warnings = checks.filter(v => v.result === "warning").length;
   $("diagnosticSummary").textContent = report.running ? "Проверяем компоненты…" : !report.checkedAt ? "Проверка ещё не выполнена" : errors ? "Проблем: " + errors : warnings ? "Нужна настройка: " + warnings : "Проверки пройдены";
   $("diagnose").disabled = busy || report.running;
-  $("diagnosticReport").disabled = !report.checkedAt || report.running;
+  $("diagnosticReport").disabled = busy || !report.checkedAt || report.running;
+  $("diagnosticFolder").disabled = busy;
   $("diagnosticChecks").setAttribute("aria-busy", String(report.running));
   $("diagnosticFailure").hidden = !report.lastFailure;
   if (report.lastFailure?.at > diagnosticFailureAt) { diagnosticFailureAt = report.lastFailure.at; if (/^(WIN_|MUSIC_)/.test(report.lastFailure.code)) $("diagnostics").open = true; }
@@ -282,10 +283,12 @@ function renderDiagnostics(report, state) {
 }
 $('diagnose').onclick = () => action($('diagnose'), () => backend('diagnose'));
 $('diagnosticReport').onclick = () => action($('diagnosticReport'), async () => {
-  const report = await backend('diagnostic_report');
-  const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
-  const link = document.createElement('a'); link.href = url; link.download = 'VC-Discord-diagnostics.json'; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+  const result = await backend('save_diagnostic_report');
+  $('diagnosticSavedPath').textContent = 'Отчёт сохранён: ' + result.path;
+  $('diagnosticSavedPath').hidden = false; $('diagnosticFolder').hidden = false;
+  notice('Отчёт сохранён. Нажмите «Открыть папку отчёта», чтобы найти файл.');
 });
+$('diagnosticFolder').onclick = () => action($('diagnosticFolder'), () => backend('open_diagnostic_folder'));
 function markDirty() { editRevision++; dirty = true; $("saveHint").textContent = "Изменения сохранятся автоматически…"; scheduleAutoSave(); }
 function selectTab(name, focus = true) {
   for (const tab of document.querySelectorAll("[data-tab]")) { const selected = tab.dataset.tab === name; tab.setAttribute("aria-selected", String(selected)); tab.tabIndex = selected ? 0 : -1; $("panel-" + tab.dataset.tab).hidden = !selected; if (selected && focus) tab.focus(); }
