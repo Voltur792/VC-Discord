@@ -3,10 +3,12 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import { apiUrl, type Settings } from "./config";
 
-export function localVisionBase(base: string): string {
-  const url = new URL(base);
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)) throw new Error("Снимки экрана доступны только для локальной модели на этом ПК: адрес 127.0.0.1, localhost или ::1. Облачная отправка снимков отключена.");
+export function visionBase(s: Pick<Settings, "llmBaseUrl" | "screenCloudConfirmed" | "screenCloudOrigin">): string {
+  const url = new URL(apiUrl(s.llmBaseUrl, ""));
+  const local = ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
+  if (!local && (url.protocol !== "https:" || !s.screenCloudConfirmed || s.screenCloudOrigin !== url.origin)) throw new Error("Для отправки снимков внешней модели разрешите её сервер во вкладке «Экран». При смене сервера разрешение нужно дать заново. Рекомендуется локальная модель.");
   if (url.hostname === "localhost") url.hostname = "127.0.0.1";
   return url.toString().replace(/\/+$/, "");
 }

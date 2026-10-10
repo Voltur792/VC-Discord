@@ -3,7 +3,7 @@ import { mkdir, stat, writeFile, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { release } from "node:os";
-import { dataDir, type Settings } from "./config";
+import { dataDir, fishModels, type Settings } from "./config";
 import { astraRecognition, chatSettings } from "./astra-settings";
 import { findMusicFFmpeg } from "./music-setup";
 import { runWindows, WindowsServiceError, windowsFailure } from "./process";
@@ -139,6 +139,10 @@ export class Diagnostics {
     return [await this.python(whisper ? "Python и Whisper" : "Python и Vosk", whisper ? s.whisperPython : s.sttPython, whisper ? "pywhispercpp" : "vosk", whisper ? "setup_whisper" : "setup_local"), { id: "stt-model", title: "Файлы модели распознавания", result: modelFound ? "ok" : "error", code: modelFound ? "STT_MODEL_FOUND" : "STT_MODEL_MISSING", detail: modelFound ? "Основные файлы выбранной модели найдены. Возможность загрузки проверяется при подключении." : whisper ? "Файл Whisper не найден. Скачайте модель в Astra и нажмите «Взять распознавание Astra» либо укажите путь вручную." : "Не найдены основные файлы Vosk. Нажмите «Подготовить Vosk автоматически».", ...(!modelFound && !whisper ? { fix: "setup_local" as const } : {}) }];
   }
   private async voice(s: Settings): Promise<Check[]> {
+    if (s.ttsEngine === "fish") {
+      const ready = !!s.fishApiKey && !!s.fishVoice && (fishModels as readonly string[]).includes(s.fishModel);
+      return [{ id: "voice", title: "Fish Audio", result: ready ? "ok" : "warning", code: "FISH_TTS_CONFIG", detail: ready ? "Ключ, модель и ID голоса указаны. Соединение проверяется кнопкой «Проверить голос»; диагностика не отправляет запрос синтеза." : "Укажите API-ключ Fish Audio, модель из списка и reference_id голоса во вкладке «Голос и модель»." }];
+    }
     if (s.ttsEngine === "api") return [{ id: "voice", title: "API озвучки", result: s.ttsModel ? "ok" : "warning", code: "TTS_CONFIG", detail: "Проверьте адрес, модель и ключ озвучки. Синтез проверяется кнопкой «Проверить голос» после подключения бота." }];
     if (s.ttsEngine === "supertonic") {
       let runtime: Check;

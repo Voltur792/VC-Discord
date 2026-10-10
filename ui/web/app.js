@@ -71,7 +71,7 @@ function fill(settings) {
     else if (name === "musicVolume") continue; // Live volume is drawn from music state, not saved defaults.
     else element.value = Array.isArray(value) ? value.join("\n") : String(value ?? "");
   }
-  for (const name of ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "googleApiKey"]) {
+  for (const name of ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "fishApiKey", "googleApiKey"]) {
     $(name).value = ""; $(name).placeholder = settings[name + "Saved"] ? "Сохранён. Пусто — оставить текущий" : name === "botToken" ? "Токен Discord-бота" : "Ключ API, если нужен";
   }
   clearSecrets.clear(); drawPickers(); providerPanels();
@@ -102,6 +102,12 @@ function providerPanels() {
   $("llmKeyHelp").textContent = "Ключи вводятся здесь один раз и хранятся зашифрованными отдельно для каждого провайдера и адреса API. При переключении подключения его ключ возвращается автоматически. Пустое поле сохраняет прежний ключ этого подключения.";
   $("ttsApi").hidden = $("ttsEngine").value !== "api"; $("ttsWindows").hidden = $("ttsEngine").value !== "windows";
   $("ttsSupertonic").hidden = $("ttsEngine").value !== "supertonic";
+  $("ttsFish").hidden = $("ttsEngine").value !== "fish";
+  let screenOrigin = "", localScreen = true;
+  try { const url = new URL($("llmBaseUrl").value); screenOrigin = url.origin; localScreen = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname); } catch {}
+  $("screenCloudConsent").hidden = localScreen;
+  $("screenCloudHelp").textContent = "Снимки будут отправляться: " + screenOrigin + ". Поддержку изображений нужно проверить у выбранной модели.";
+  if ($("screenCloudOrigin").value !== screenOrigin || localScreen) { $("screenCloudConfirmed").checked = false; $("screenCloudOrigin").value = ""; }
   $("supertonicVoice").querySelector('[value="custom"]').disabled = !$("supertonicCustomVoicePath").value;
   drawCustomVoiceLabel();
 }
@@ -298,7 +304,15 @@ for (const tab of document.querySelectorAll("[data-tab]")) {
   tab.onkeydown = event => { const tabs = [...document.querySelectorAll("[data-tab]")], index = tabs.indexOf(tab); let next; if (event.key === "ArrowRight") next = (index + 1) % tabs.length; if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length; if (event.key === "Home") next = 0; if (event.key === "End") next = tabs.length - 1; if (next !== undefined) { event.preventDefault(); selectTab(tabs[next].dataset.tab); } };
 }
 $("settingsForm").oninput = event => { if (event.target.name && event.target.id !== "musicVolume") markDirty(); };
-$("settingsForm").onchange = event => { if (event.target.id === "sttEngine") $("sttUseAstra").checked = false; if (event.target.name && event.target.id !== "musicVolume") markDirty(); providerPanels(); };
+$("settingsForm").onchange = event => {
+  if (event.target.id === "sttEngine") $("sttUseAstra").checked = false;
+  if (event.target.id === "screenCloudConfirmed") {
+    try { const url = new URL($("llmBaseUrl").value); $("screenCloudOrigin").value = event.target.checked && url.protocol === "https:" ? url.origin : ""; }
+    catch { $("screenCloudOrigin").value = ""; }
+  }
+  providerPanels();
+  if (event.target.name && event.target.id !== "musicVolume") markDirty();
+};
 $("settingsForm").addEventListener("focusout", () => { if (dirty) scheduleAutoSave(); });
 $("settingsForm").onsubmit = event => { event.preventDefault(); void action($("save"), save); };
 $("connect").onclick = () => action($("connect"), async () => { if (snapshot?.connected) await backend("disconnect"); else { if (dirty) await save(); await backend("connect"); } });

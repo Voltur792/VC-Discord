@@ -12,7 +12,7 @@ import { LocalSetup, WhisperSetup, SupertonicSetup } from "./setup";
 import { astraRecognition, astraChat, astraConnections, astraPersonality, chatSettings } from "./astra-settings";
 import { WhisperWorker } from "./whisper";
 import { discoverDiscord } from "./discord-setup";
-import { BrowserScreen, localVisionBase, openScreenPicker } from "./screen";
+import { BrowserScreen, visionBase, openScreenPicker } from "./screen";
 import { DiscordMusic } from "./music";
 import { MusicSetup } from "./music-setup";
 import { Diagnostics } from "./diagnostics";
@@ -175,7 +175,7 @@ export class VoiceBridge {
         }
       }
       const effective = value && typeof value === "object" ? { ...value as Record<string, unknown> } : {};
-      for (const key of ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "googleApiKey"]) {
+      for (const key of ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "fishApiKey", "googleApiKey"]) {
         if (effective[key] === "" || effective[key] === undefined) delete effective[key];
         if (effective[`clear_${key}`] === true) effective[key] = "";
       }
@@ -184,8 +184,8 @@ export class VoiceBridge {
       const changed = (keys: (keyof Settings)[]) => keys.some(key => JSON.stringify(previous[key]) !== JSON.stringify(candidate[key]));
       const connectionChanged = changed(["botToken", "guildId", "channelId"]);
       const accessChanged = changed(["commandsEnabled", "allowedUserIds", "confirmCommands", "commandPhrase", "moderationEnabled", "moderatorUserIds", "confirmModeration", "moderationUserAliases", "moderationChannelAliases", "googleSpeechConfirmed"]);
-      const voiceChanged = changed(["ttsEngine", "ttsPython", "supertonicModelPath", "supertonicVoice", "supertonicCustomVoicePath", "supertonicSpeed", "windowsVoice", "windowsRate", "ttsBaseUrl", "ttsModel", "ttsVoice", "ttsApiKey", "sttEngine", "sttBaseUrl", "sttModel", "sttApiKey", "sttPython", "whisperPython", "whisperModelPath", "voskModelPath", "sttUseAstra", "googleApiKey"]);
-      const modelChanged = changed(["llmBaseUrl", "llmModel", "llmProviderId", "llmUseAstra", "llmUseAstraPersonality", "llmApiKey", "screenVisionConfirmed", "screenDisplay"]);
+      const voiceChanged = changed(["ttsEngine", "ttsPython", "supertonicModelPath", "supertonicVoice", "supertonicCustomVoicePath", "supertonicSpeed", "windowsVoice", "windowsRate", "ttsBaseUrl", "ttsModel", "ttsVoice", "ttsApiKey", "fishApiKey", "fishModel", "fishVoice", "sttEngine", "sttBaseUrl", "sttModel", "sttApiKey", "sttPython", "whisperPython", "whisperModelPath", "voskModelPath", "sttUseAstra", "googleApiKey"]);
+      const modelChanged = changed(["llmBaseUrl", "llmModel", "llmProviderId", "llmUseAstra", "llmUseAstraPersonality", "llmApiKey", "screenVisionConfirmed", "screenCloudConfirmed", "screenCloudOrigin", "screenDisplay"]);
       this.configSaving = true;
       try {
         this.settings = await this.store.save(value);
@@ -288,7 +288,7 @@ export class VoiceBridge {
             const user: ChatMessage = { role: "user", content: JSON.stringify({ speaker: job.speaker.userId, said: route.text }) };
             let requestUser = user;
             if (this.screenSharing && this.settings.allowedUserIds.includes(job.speaker.userId)) {
-              localVisionBase(modelSettings.llmBaseUrl);
+              visionBase(modelSettings);
               const image = this.browserScreen.capture(controller.signal);
               if (controller.signal.aborted || !this.screenSharing || !this.transport.present(job.speaker) || !this.settings.allowedUserIds.includes(job.speaker.userId)) continue;
               requestUser = { role: "user", content: [
@@ -378,7 +378,6 @@ export class VoiceBridge {
   }
   async voices(): Promise<unknown> { return { voices: await this.providers.voices() }; }
   async prepareScreen(): Promise<unknown> {
-    localVisionBase((await chatSettings(this.settings)).llmBaseUrl);
     if (!this.transport.connected) throw new Error("Сначала сохраните настройки и подключите бота к голосовому каналу, затем выберите экран.");
     const result = await this.browserScreen.prepare();
     return { ...result, opened: await openScreenPicker(result.url) };
@@ -389,24 +388,29 @@ export class VoiceBridge {
   async startScreen(): Promise<unknown> {
     const epoch = ++this.screenEpoch;
     const modelSettings = await chatSettings(this.settings);
-    localVisionBase(modelSettings.llmBaseUrl);
+    const base = visionBase(modelSettings);
+    const local = ["127.0.0.1", "[::1]", "localhost"].includes(new URL(base).hostname);
     if (!this.transport.connected) throw new Error("Сначала подключите бота к голосовому каналу.");
     if (!this.settings.allowedUserIds.length) throw new Error("Добавьте свой Discord ID во вкладке «Доступ к ПК». Только эти аккаунты смогут обсуждать экран.");
-    if (!this.settings.screenVisionConfirmed || !modelSettings.llmModel) throw new Error("Выберите локальную разговорную модель с поддержкой изображений и отметьте это во вкладке «Экран».");
-    let availableModels: string[];
-    try { availableModels = await modelNames({ ...modelSettings, llmUseAstra: false, llmBaseUrl: localVisionBase(modelSettings.llmBaseUrl) }, AbortSignal.timeout(15000)); }
-    catch (error) {
-      if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new Error("Сервер модели не ответил за 15 секунд. Проверьте его состояние в LM Studio и повторите попытку.");
-      if (error instanceof Error && (error.message.startsWith("Сервис вернул HTTP ") || error.message.startsWith("Список моделей:"))) throw error;
-      const code = (error as { cause?: { code?: string } })?.cause?.code;
-      if (code === "ECONNREFUSED") throw new Error("Сервер модели не запущен по адресу из настроек. Включите сервер в LM Studio и проверьте адрес во вкладке «Голос и модель».");
-      throw new Error("Не удалось получить список моделей локального сервера. Проверьте адрес во вкладке «Голос и модель» и нажмите «Найти модели».");
+    if (!this.settings.screenVisionConfirmed || !modelSettings.llmModel) throw new Error("Выберите разговорную модель с поддержкой изображений и отметьте это во вкладке «Экран». Рекомендуется локальная модель.");
+    // Cloud providers may expose Chat Completions without listing models. No
+    // paid image probe is sent; the first user utterance checks compatibility.
+    if (local) {
+      let availableModels: string[];
+      try { availableModels = await modelNames({ ...modelSettings, llmUseAstra: false, llmBaseUrl: base }, AbortSignal.timeout(15000)); }
+      catch (error) {
+        if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new Error("Сервер модели не ответил за 15 секунд. Проверьте его состояние в LM Studio и повторите попытку.");
+        if (error instanceof Error && (error.message.startsWith("Сервис вернул HTTP ") || error.message.startsWith("Список моделей:"))) throw error;
+        const code = (error as { cause?: { code?: string } })?.cause?.code;
+        if (code === "ECONNREFUSED") throw new Error("Сервер модели не запущен по адресу из настроек. Включите сервер в LM Studio и проверьте адрес во вкладке «Голос и модель».");
+        throw new Error("Не удалось получить список моделей локального сервера. Проверьте адрес во вкладке «Голос и модель» и нажмите «Найти модели».");
+      }
+      if (!availableModels.includes(modelSettings.llmModel)) throw new Error("Выбранная модель не загружена в локальном сервере. Загрузите её и повторите включение показа экрана.");
     }
-    if (!availableModels.includes(modelSettings.llmModel)) throw new Error("Выбранная модель не загружена в локальном сервере. Загрузите её и повторите включение показа экрана.");
     this.browserScreen.capture(AbortSignal.timeout(10000));
     if (epoch !== this.screenEpoch || !this.transport.connected) throw new Error("Включение показа экрана отменено.");
     this.controller?.abort(); this.queue = []; this.history = []; this.lastScreenAt = 0;
-    this.screenSharing = true; this.note("Показ экрана включён для локальной модели. Снимки передаются с репликами разрешённых аккаунтов; ответы слышны всем в канале.");
+    this.screenSharing = true; this.note(`Показ экрана включён: ${local ? "локальная модель" : new URL(base).origin}. Снимки передаются с репликами разрешённых аккаунтов; ответы слышны всем в канале.`);
     return { ok: true };
   }
   stopScreen(): { ok: true } {
@@ -445,7 +449,6 @@ export class VoiceBridge {
   }
   async useAstraChatModel(): Promise<unknown> {
     const selected = await astraChat();
-    if (this.screenSharing) localVisionBase(selected.llmBaseUrl);
     const key = modelKey(this.settings, selected);
     await this.save({ ...selected, llmApiKey: key, llmKeyScope: llmKeyScope(selected), llmUseAstra: true });
     const keyNotice = key ? "Модель Astra выбрана, её сохранённый ключ восстановлен." : "Модель и адрес взяты из Astra. Введите ключ этого провайдера один раз: плагин сохранит его отдельно от остальных ключей.";
@@ -456,7 +459,7 @@ export class VoiceBridge {
     let voice: any;
     try { voice = JSON.parse(await readFile(join(root, "config", "settings.json"), "utf8")).voice; }
     catch { throw new Error("Не удалось прочитать настройки голоса Astra."); }
-    if (voice?.tts_provider === "vox") throw new Error("Vox пока недоступен для Discord: API Astra не возвращает его аудио. Выберите Supertonic в Astra или в этом плагине.");
+    if (voice?.tts_provider === "vox") throw new Error("Vox пока недоступен для Discord: API Astra не возвращает его аудио, а лицензия не разрешает включать движок в сторонний плагин. Выберите Supertonic, Windows или Fish Audio.");
     if (voice?.tts_provider !== "supertonic") throw new Error("Сейчас в Astra выбран другой движок. Автоматическое подключение поддерживает Supertonic 3.");
     const model = join(root, "data", "models", "supertonic-3");
     const selected = voice.voices?.supertonic;

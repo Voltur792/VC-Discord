@@ -10,14 +10,15 @@ export interface Settings {
   bargeIn: boolean; silenceMs: number; maxUtteranceSecs: number;
   llmBaseUrl: string; llmApiKey: string; llmModel: string; llmUseAstra: boolean; llmProviderId: string; llmProviderKeys: Record<string, string>; llmKeyOrigin: string;
   llmUseAstraPersonality: boolean; llmPersonalityOrigin: string;
-  screenDisplay: string; screenVisionConfirmed: boolean;
+  screenDisplay: string; screenVisionConfirmed: boolean; screenCloudConfirmed: boolean; screenCloudOrigin: string;
   sttEngine: "api" | "vosk" | "whisper" | "google"; sttBaseUrl: string; sttApiKey: string; sttModel: string;
   googleSpeechConfirmed: boolean; googleApiKey: string;
   whisperModelPath: string; whisperPython: string; sttUseAstra: boolean;
   sttPython: string; voskModelPath: string; language: string;
-  ttsEngine: "windows" | "api" | "supertonic"; windowsVoice: string; windowsRate: number;
+  ttsEngine: "windows" | "api" | "fish" | "supertonic"; windowsVoice: string; windowsRate: number;
   ttsPython: string; supertonicModelPath: string; supertonicVoice: string; supertonicSpeed: number; supertonicCustomVoicePath: string;
   ttsBaseUrl: string; ttsApiKey: string; ttsModel: string; ttsVoice: string;
+  fishApiKey: string; fishModel: string; fishVoice: string;
   musicVolume: number; musicFFmpeg: string;
   moderationEnabled: boolean; confirmModeration: boolean; moderatorUserIds: string[];
   moderationUserAliases: string; moderationChannelAliases: string;
@@ -28,7 +29,7 @@ export const defaults: Settings = {
   bargeIn: true, silenceMs: 800, maxUtteranceSecs: 20,
   llmBaseUrl: "http://127.0.0.1:1234/v1", llmApiKey: "", llmModel: "", llmUseAstra: false, llmProviderId: "manual", llmProviderKeys: {}, llmKeyOrigin: "",
   llmUseAstraPersonality: true, llmPersonalityOrigin: "https://api.hubris.pw",
-  screenDisplay: "primary", screenVisionConfirmed: false,
+  screenDisplay: "primary", screenVisionConfirmed: false, screenCloudConfirmed: false, screenCloudOrigin: "",
   sttEngine: "api", sttBaseUrl: "https://api.openai.com/v1", sttApiKey: "", sttModel: "whisper-1",
   sttPython: "python", voskModelPath: "", language: "ru",
   whisperModelPath: "", whisperPython: "python", sttUseAstra: false,
@@ -36,10 +37,12 @@ export const defaults: Settings = {
   ttsEngine: "windows", windowsVoice: "", windowsRate: 0,
   ttsPython: "python", supertonicModelPath: "", supertonicVoice: "F4", supertonicSpeed: 1.1, supertonicCustomVoicePath: "",
   ttsBaseUrl: "https://api.openai.com/v1", ttsApiKey: "", ttsModel: "tts-1", ttsVoice: "alloy",
+  fishApiKey: "", fishModel: "s2.1-pro-free", fishVoice: "",
   musicVolume: 50, musicFFmpeg: "",
   moderationEnabled: false, confirmModeration: true, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
 };
-const secrets = ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "googleApiKey"] as const;
+const secrets = ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "fishApiKey", "googleApiKey"] as const;
+export const fishModels = ["s2.1-pro-free", "s2.1-pro", "s2-pro", "s1", "drama-3-preview"] as const;
 export const dataDir = process.env.DVOICE_DATA_DIR || join(process.env.APPDATA || join(homedir(), ".config"), "discord-voice-bridge");
 export function ids(value: unknown): string[] {
   const list = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\s,;]+/) : [];
@@ -63,7 +66,10 @@ export function normalizeSettings(value: unknown, base: Settings = defaults): Se
     } else if (typeof raw[key] === "string") (result as any)[key] = (raw[key] as string).trim().slice(0, 8192);
   }
   result.sttEngine = ["vosk", "whisper", "google"].includes(result.sttEngine) ? result.sttEngine : "api";
-  result.ttsEngine = ["api", "supertonic"].includes(result.ttsEngine) ? result.ttsEngine : "windows";
+  result.ttsEngine = ["api", "fish", "supertonic"].includes(result.ttsEngine) ? result.ttsEngine : "windows";
+  try {
+    if (!result.screenCloudConfirmed || result.screenCloudOrigin !== new URL(result.llmBaseUrl).origin) { result.screenCloudConfirmed = false; result.screenCloudOrigin = ""; }
+  } catch { result.screenCloudConfirmed = false; result.screenCloudOrigin = ""; }
   result.addressMode = result.addressMode === "name" ? "name" : "all";
   result.silenceMs = Math.max(350, Math.min(2000, result.silenceMs));
   result.maxUtteranceSecs = Math.max(5, Math.min(30, result.maxUtteranceSecs));
@@ -87,6 +93,8 @@ export function validateSettings(s: Settings): void {
   }
   if (s.ttsEngine === "supertonic" && !/^(?:[MF][1-5]|custom)$/.test(s.supertonicVoice)) throw new Error("Выберите голос Supertonic F1–F5, M1–M5 или свой JSON.");
   if (s.ttsEngine === "supertonic" && s.supertonicVoice === "custom" && !s.supertonicCustomVoicePath) throw new Error("Загрузите JSON собственного голоса.");
+  if (s.ttsEngine === "fish" && !(fishModels as readonly string[]).includes(s.fishModel)) throw new Error("Выберите поддерживаемую модель Fish Audio из списка. Неизвестное имя может переключить сервис на платную модель.");
+  if (/[\r\n\0]/.test(s.fishApiKey)) throw new Error("Ключ Fish Audio должен быть одной строкой.");
   for (const url of [s.llmBaseUrl, s.sttBaseUrl, s.ttsBaseUrl]) apiUrl(url, "");
 }
 export function apiUrl(base: string, suffix: string): string {

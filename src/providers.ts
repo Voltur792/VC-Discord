@@ -1,11 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
-import { apiUrl, type Settings } from "./config";
+import { apiUrl, fishModels, type Settings } from "./config";
 import { fromWav, resample, wav } from "./audio";
 import { runWindows } from "./process";
 import { SupertonicWorker } from "./supertonic";
-import { localVisionBase } from "./screen";
+import { visionBase } from "./screen";
 import { WhisperWorker } from "./whisper";
 import { chatSettings, astraRecognition } from "./astra-settings";
 import { googleTranscribe } from "./google-stt";
@@ -54,13 +54,13 @@ export async function modelNames(s: Settings, signal?: AbortSignal): Promise<str
 export async function publicChat(s: Settings, messages: ChatMessage[], signal?: AbortSignal, retryAllowed?: () => boolean): Promise<string> {
   s = await chatSettings(s);
   const hasImages = messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"));
-  const base = hasImages ? localVisionBase(s.llmBaseUrl) : s.llmBaseUrl;
+  const base = hasImages ? visionBase(s) : s.llmBaseUrl;
   const model = s.llmModel || (await modelNames(s, signal))[0];
   if (!model) throw new Error("В сервере модели нет загруженной модели. Загрузите её и укажите имя в настройках.");
   const local = ["127.0.0.1", "[::1]", "localhost"].includes(new URL(base).hostname);
   // Reasoning consumes the same token limit as the final answer. Local vision
   // models need room to finish thinking; never speak their reasoning field.
-  const budgets = local ? [2048, 4096] : [300];
+  const budgets = local ? [2048, 4096] : [hasImages ? 1024 : 300];
   for (let attempt = 0; attempt < budgets.length; attempt++) {
     signal?.throwIfAborted();
     if (attempt > 0 && retryAllowed && !retryAllowed()) throw new Error("Повторный запрос отменён: участник или показ экрана больше недоступны.");
@@ -72,7 +72,7 @@ export async function publicChat(s: Settings, messages: ChatMessage[], signal?: 
     });
     if (hasImages && [400, 415, 422].includes(response.status)) {
       await response.body?.cancel();
-      throw new Error("Локальная модель не приняла снимок. Проверьте, что выбранная модель и её сервер поддерживают изображения в Chat Completions.");
+      throw new Error("Модель не приняла снимок. Проверьте, что выбранная модель и её сервер поддерживают изображения в Chat Completions.");
     }
     const body = JSON.parse((await limitedBody(response, 2_000_000, "Модель разговора")).toString("utf8"));
     const choice = body.choices?.[0], message = choice?.message;
@@ -180,6 +180,22 @@ export class Providers {
     if (s.ttsEngine === "windows") {
       const audio = fromWav(await runWindows({ action: "speak", text: spoken, voice: s.windowsVoice, rate: s.windowsRate }, signal));
       return resample(audio.pcm, audio.rate, audio.channels, 48000, 2);
+    }
+    if (s.ttsEngine === "fish") {
+      if (!s.fishApiKey) throw new Error("Fish Audio: введите отдельный API-ключ во вкладке «Голос и модель».");
+      if (!s.fishVoice) throw new Error("Fish Audio: укажите reference_id выбранного голоса из Fish Audio.");
+      if (!(fishModels as readonly string[]).includes(s.fishModel)) throw new Error("Fish Audio: выберите модель из списка; неизвестное имя не отправляется сервису.");
+      const response = await providerFetch("Fish Audio", "https://api.fish.audio/v1/tts", {
+        method: "POST", headers: { ...headers(s.fishApiKey, true), model: s.fishModel }, signal: requestSignal(signal), redirect: "error",
+        body: JSON.stringify({ text: spoken, reference_id: s.fishVoice, format: "pcm", sample_rate: 24000 }),
+      });
+      if ([400, 404, 422].includes(response.status)) {
+        await response.body?.cancel();
+        throw new Error(`Fish Audio: HTTP ${response.status}. Проверьте доступность модели и reference_id голоса в своём аккаунте Fish Audio.`);
+      }
+      const pcm = await limitedBody(response, 12_000_000, "Fish Audio");
+      if (!pcm.length || pcm.length % 2) throw new Error("Fish Audio вернул пустой или повреждённый звук PCM.");
+      return resample(pcm, 24000, 1, 48000, 2);
     }
     const response = await providerFetch("Озвучка", apiUrl(s.ttsBaseUrl, "/audio/speech"), {
       method: "POST", headers: headers(s.ttsApiKey, true), signal: requestSignal(signal), redirect: "error",
