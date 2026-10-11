@@ -250,7 +250,7 @@ export class VoiceTransport {
   musicPresence(title = "", artist = "", service = "", paused = false): void {
     if (!this.client?.isReady()) return;
     const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-    const label = title ? `${paused ? "Пауза • " : ""}${service === "vk" ? "VK" : "Яндекс Музыка"} • ${clean(artist) ? clean(artist) + " — " : ""}${clean(title)}` : "Голосовой канал • Astra";
+    const label = title ? `${paused ? "Пауза • " : ""}${this.getSettings().radioEnabled ? "Радиоведущая — Astra • " : ""}${service === "spotify" ? "Spotify" : service === "vk" ? "VK" : "Яндекс Музыка"} • ${clean(artist) ? clean(artist) + " — " : ""}${clean(title)}` : "Голосовой канал • Astra";
     const name = [...label].slice(0, 128).join("");
     this.pendingActivity = { name, type: title && !paused ? ActivityType.Listening : ActivityType.Watching };
     if (this.activityTimer) return;

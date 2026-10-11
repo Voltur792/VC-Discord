@@ -19,6 +19,9 @@ import { Diagnostics } from "./diagnostics";
 import { WindowsServiceError } from "./process";
 import { VoiceModeration } from "./moderation";
 import { ReportExport } from "./report-export";
+import { radioPrompt, type RadioTrack } from "./radio";
+import { RadioShiftSession } from "./radio-shift";
+import { TimerIntegration } from "./timer-integration";
 
 interface Job { speaker: Speaker; pcm: Buffer; createdAt: number }
 interface Pending { id: string; speaker: Speaker; command: string; expiresAt: number }
@@ -33,6 +36,7 @@ export class VoiceBridge {
   private store = new SettingsStore();
   private settings: Settings = normalizeSettings({});
   private providers = new Providers();
+  private connectPending = false;
   private setup = new LocalSetup();
   private whisperSetup = new WhisperSetup();
   private supertonicSetup = new SupertonicSetup();
@@ -81,7 +85,7 @@ export class VoiceBridge {
   private updates: { at: number; text: string; error: boolean }[] = [];
   private saveChain: Promise<unknown> = Promise.resolve();
   private readonly transport = new VoiceTransport(
-    () => this.settings,
+    () => this.effectiveSettings(),
     (speaker, pcm) => this.enqueue(speaker, pcm),
     (message, error, source) => {
       this.status = message;
@@ -89,13 +93,46 @@ export class VoiceBridge {
       this.note(message, !!error, source);
       if (source === "voice_receive") { const code = error ? message.match(/\bOPUS_[A-Z_]+\b/)?.[0] || "VOICE_RECEIVE_FAILED" : "VOICE_RECEIVE_RECOVERED"; void this.ctx?.log(error ? "warn" : "info", `VC-Discord: ${code}`).catch(() => {}); }
     },
-    () => { if (this.phase === "speaking" || this.phase === "thinking") this.controller?.abort(); },
+    () => { this.music.cancelRadio(); if (this.phase === "speaking" || this.phase === "thinking") this.controller?.abort(); },
     () => this.cancelWaiting(),
   );
   private readonly gate = new CommandGate(() => this.settings, speaker => !this.configSaving && this.transport.present(speaker), text => this.nativeCommand(text));
-  private readonly music = new DiscordMusic(this.transport, () => this.settings, (text, error) => this.note(text, error, "music"), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); }, () => {
+  private readonly music = new DiscordMusic(this.transport, () => this.effectiveSettings(), (text, error) => this.note(text, error, "music"), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); }, () => {
     if (this.lastErrorSource === "music") { this.lastError = ""; this.lastErrorSource = undefined; this.note("Связь с музыкальным сервисом восстановлена."); }
-  });
+  }, (track, signal) => this.announceRadio(track, signal));
+  private readonly radioShift = new RadioShiftSession(() => this.settings.radioScheduleEnabled, () => this.transport.connected || this.connectPending,
+    async (shift, valid) => {
+      await this.connect(valid);
+      if (!valid()) throw new Error("Смена отменена или время эфира закончилось.");
+      const result = await this.music.play(shift.music) as { cancelled?: boolean };
+      if (!valid() || result.cancelled || !this.transport.connected) throw new Error("Не удалось подтвердить воспроизведение эфира.");
+      this.note("Радиоведущая на смене: " + shift.name);
+    }, () => this.disconnectCore());
+  private readonly timerIntegration = new TimerIntegration({
+    radio_state: () => this.radioState(),
+    radio_defaults: () => ({ ...this.radioState(), guild_id: this.settings.guildId, channel_id: this.settings.channelId, channels: this.transport.moderationRooms() }),
+    radio_channels: async params => {
+      const guildId = String(params.guild_id || this.settings.guildId);
+      if (guildId && !/^\d{17,20}$/.test(guildId)) throw new Error("Некорректный ID сервера.");
+      const result = await discoverDiscord({ ...this.settings, guildId });
+      return { guilds: result.guilds, channels: result.channels, guild_id: result.guildId, channel_id: result.channelId };
+    },
+    radio_enable: () => this.save({ radioScheduleEnabled: true }),
+    radio_start: params => this.radioShift.start(params),
+    radio_stop: params => {
+      if (!/^[a-f0-9]{32}$/.test(String(params.run_id || ""))) throw new Error("Некорректный идентификатор эфира.");
+      return this.radioShift.stop(params.run_id);
+    },
+  }, error => this.errorMessage(error));
+  private radioState(): Record<string, unknown> {
+    const state = this.radioShift.state();
+    return { ...state, message: this.errorMessage(new Error(String(state.message || ""))) };
+  }
+  private effectiveSettings(): Settings {
+    const shift = this.radioShift?.active;
+    return shift ? { ...this.settings, guildId: shift.guild_id, channelId: shift.channel_id,
+      radioEnabled: true, radioEvery: shift.every, radioWhen: shift.when, radioNext: shift.announce_next, radioSkipEmpty: shift.skip_empty } : this.settings;
+  }
   private readonly moderation = new VoiceModeration(() => this.settings, this.transport, () => this.configSaving, (text, error) => this.note(text, error));
   musicCurrent(): Promise<unknown> { return this.music.current(); }
   musicSearch(value: unknown): unknown { return this.music.beginJob("search", value); }
@@ -103,7 +140,7 @@ export class VoiceBridge {
   musicPlaylists(value: unknown): unknown { return this.music.beginJob("playlists", value); }
   musicNext(value: unknown): unknown { return this.music.beginJob("next", value); }
   musicPause(): unknown { return this.music.pause(); }
-  musicStop(): unknown { return this.music.stop(); }
+  musicStop(): unknown { return this.radioShift.active ? this.radioShift.stop() : this.music.stop(); }
   musicVolume(value: unknown): unknown { return this.music.volume(value); }
   setupMusic(): { ok: true } { return this.musicSetup.start(this.settings.musicFFmpeg); }
   async init(ctx: PluginContext): Promise<void> {
@@ -112,6 +149,7 @@ export class VoiceBridge {
     try { this.settings = await this.store.load(); }
     catch (error) { this.loadError = safeError(error); this.note(this.loadError, true); this.diagnostics.record(error); }
     this.diagnostics.start();
+    try { await this.timerIntegration.start(); } catch (error) { this.recordError(error, "timer_integration"); }
   }
   private note(text: string, error = false, source?: "voice_receive" | "music" | "settings"): void {
     this.updates.unshift({ at: Date.now(), text: safeError(new Error(text), this.settings), error });
@@ -132,7 +170,7 @@ export class VoiceBridge {
       whisperSetup: { running: this.whisperSetup.running, status: this.whisperSetup.status },
       supertonicSetup: { running: this.supertonicSetup.running, status: this.supertonicSetup.status },
       screen: { active: this.screenSharing, lastSentAt: this.lastScreenAt, ...this.browserScreen.status() },
-      music: this.music.state(),
+      music: this.music.state(), radioShift: this.radioState(),
       moderation: this.moderation.state(),
       musicSetup: { running: this.musicSetup.running, ready: this.musicSetup.ready, status: this.musicSetup.status },
       diagnostics: this.diagnostics.state(),
@@ -189,9 +227,11 @@ export class VoiceBridge {
       this.configSaving = true;
       try {
         this.settings = await this.store.save(value);
+        if (!this.settings.radioScheduleEnabled) this.radioShift.stop();
         if (connectionChanged) this.disconnect();
         else if (accessChanged) this.transport.invalidate();
         if (voiceChanged || modelChanged) { this.controller?.abort(); this.queue = []; this.transport.stopPlayback(); }
+        if (voiceChanged || modelChanged || changed(["radioEnabled", "radioEvery", "radioWhen", "radioNext", "radioSkipEmpty"])) this.music.cancelRadio();
         if (voiceChanged) this.providers.stop();
         if (modelChanged) { this.history = []; this.browserScreen.stop(); this.screenSharing = false; this.screenEpoch++; this.lastScreenAt = 0; }
         this.loadError = "";
@@ -202,26 +242,36 @@ export class VoiceBridge {
     });
     this.saveChain = operation.catch(() => {}); return operation;
   }
-  async connect(): Promise<unknown> {
+  async connect(valid?: () => boolean): Promise<unknown> {
     if (this.configSaving) throw new Error("Дождитесь сохранения настроек.");
+    if (this.connectPending) throw new Error("Подключение уже выполняется.");
+    if (!valid && this.radioShift.active) throw new Error("Сначала завершите текущую смену радиоведущей.");
+    const current = valid || (() => true);
+    this.connectPending = true;
     this.phase = "connecting"; this.lastError = ""; this.lastErrorSource = undefined;
     try {
       if (this.loadError) throw new Error(this.loadError);
-      validateSettings(this.settings);
+      validateSettings(this.effectiveSettings());
       const recognition = this.settings.sttUseAstra && ["whisper", "google"].includes(this.settings.sttEngine) ? { ...this.settings, ...await astraRecognition(this.settings.googleSpeechConfirmed), sttUseAstra: false } : this.settings;
+      if (!current()) throw new Error("Подключение отменено.");
       if (recognition.sttEngine === "vosk") await this.providers.vosk.start(recognition);
       if (recognition.sttEngine === "whisper") await this.providers.whisper.start(recognition);
+      if (!current()) { this.providers.stop(); throw new Error("Подключение отменено."); }
       await this.transport.connect(); this.phase = "listening"; return { ok: true };
     } catch (error) {
       this.phase = this.transport.connected ? "listening" : "offline";
       this.status = safeError(error, this.settings); this.note(this.status, true); throw error;
-    }
+    } finally { this.connectPending = false; }
   }
   disconnect(): { ok: true } {
+    if (this.radioShift.active) { this.radioShift.stop(); return { ok: true }; }
+    return this.disconnectCore();
+  }
+  private disconnectCore(): { ok: true } {
     this.transport.disconnect(); this.providers.stop(); this.phase = "offline"; this.status = "Бот отключён"; return { ok: true };
   }
-  stopSpeech(): { ok: true } { this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.note("Озвучка и ожидающие реплики остановлены."); return { ok: true }; }
-  clearHistory(): { ok: true } { this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.history = []; this.lastHeard = ""; this.lastAnswer = ""; this.note("История общего разговора очищена."); return { ok: true }; }
+  stopSpeech(): { ok: true } { this.music.cancelRadio(); this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.note("Озвучка и ожидающие реплики остановлены."); return { ok: true }; }
+  clearHistory(): { ok: true } { this.music.cancelRadio(); this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.history = []; this.lastHeard = ""; this.lastAnswer = ""; this.note("История общего разговора очищена."); return { ok: true }; }
   private enqueue(speaker: Speaker, pcm: Buffer): void {
     if (!this.transport.present(speaker) || this.configSaving) return;
     const now = Date.now();
@@ -315,6 +365,37 @@ export class VoiceBridge {
     this.phase = "speaking";
     const pcm = await this.providers.speak(this.settings, text, signal);
     signal.throwIfAborted(); await this.transport.play(pcm, signal);
+  }
+  private async announceRadio(track: RadioTrack, source: AbortSignal): Promise<void> {
+    // Conversation always has priority. Do not queue an old song announcement.
+    if (this.processing || this.queue.length || this.commandBusy || this.configSaving || !this.transport.connected) return;
+    const hasAudience = () => !this.effectiveSettings().radioSkipEmpty || this.transport.participants().length > 0;
+    if (!hasAudience()) return;
+    source.throwIfAborted();
+    const controller = new AbortController();
+    const signal = AbortSignal.any([source, controller.signal]);
+    const audienceTimer = setInterval(() => { if (!hasAudience()) controller.abort(); }, 250);
+    audienceTimer.unref();
+    this.controller = controller; this.processing = true;
+    try {
+      this.phase = "thinking";
+      const settings = await chatSettings(this.settings);
+      const personality = await astraPersonality(settings);
+      signal.throwIfAborted();
+      if (!hasAudience()) return;
+      const reply = await publicChat(settings, [conversationSystem(personality), { role: "user", content: radioPrompt(track) }], signal);
+      signal.throwIfAborted();
+      if (!this.effectiveSettings().radioEnabled || !this.transport.connected || !hasAudience()) return;
+      this.lastAnswer = reply;
+      await this.say(reply, signal);
+    } catch (error) {
+      if (!controller.signal.aborted || source.aborted || hasAudience()) throw error;
+    } finally {
+      clearInterval(audienceTimer);
+      if (this.controller === controller) this.controller = undefined;
+      this.processing = false; this.phase = this.transport.connected ? "listening" : "offline";
+      void this.drain();
+    }
   }
   private async command(speaker: Speaker, command: string): Promise<string> {
     if (this.pending && (this.pending.expiresAt <= Date.now() || !this.transport.present(this.pending.speaker))) this.pending = undefined;
@@ -499,5 +580,5 @@ export class VoiceBridge {
     try { await this.say("Привет! Я Астра. Голосовое соединение с Discord работает.", controller.signal); return { ok: true }; }
     finally { if (this.controller === controller) this.controller = undefined; this.phase = this.transport.connected ? "listening" : "offline"; }
   }
-  shutdown(): void { this.closing = true; this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.supertonicSetup.stop(); this.musicSetup.stop(); this.disconnect(); }
+  async shutdown(): Promise<void> { this.closing = true; this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.supertonicSetup.stop(); this.musicSetup.stop(); this.disconnect(); await this.timerIntegration.close(); }
 }

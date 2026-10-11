@@ -20,6 +20,7 @@ export interface Settings {
   ttsBaseUrl: string; ttsApiKey: string; ttsModel: string; ttsVoice: string;
   fishApiKey: string; fishModel: string; fishVoice: string;
   musicVolume: number; musicFFmpeg: string;
+  radioEnabled: boolean; radioEvery: number; radioWhen: "start" | "end"; radioNext: boolean; radioScheduleEnabled: boolean; radioSkipEmpty: boolean;
   moderationEnabled: boolean; confirmModeration: boolean; moderatorUserIds: string[];
   moderationUserAliases: string; moderationChannelAliases: string;
 }
@@ -39,6 +40,7 @@ export const defaults: Settings = {
   ttsBaseUrl: "https://api.openai.com/v1", ttsApiKey: "", ttsModel: "tts-1", ttsVoice: "alloy",
   fishApiKey: "", fishModel: "s2.1-pro-free", fishVoice: "",
   musicVolume: 50, musicFFmpeg: "",
+  radioEnabled: false, radioEvery: 3, radioWhen: "end", radioNext: true, radioScheduleEnabled: false, radioSkipEmpty: true,
   moderationEnabled: false, confirmModeration: true, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
 };
 const secrets = ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "fishApiKey", "googleApiKey"] as const;
@@ -76,6 +78,8 @@ export function normalizeSettings(value: unknown, base: Settings = defaults): Se
   result.windowsRate = Math.max(-5, Math.min(5, Math.round(result.windowsRate)));
   result.supertonicSpeed = Math.max(0.7, Math.min(2, result.supertonicSpeed));
   result.musicVolume = Math.max(0, Math.min(100, result.musicVolume));
+  result.radioEvery = [1, 3, 5].includes(result.radioEvery) ? result.radioEvery : 3;
+  result.radioWhen = result.radioWhen === "start" ? "start" : "end";
   return result;
 }
 export function validateSettings(s: Settings): void {

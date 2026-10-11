@@ -7,6 +7,7 @@ import type { Settings } from "./config";
 import { limitedBody } from "./providers";
 import type { VoiceTransport } from "./voice";
 import { findMusicFFmpeg } from "./music-setup";
+import { RadioPresenter, type RadioTrack } from "./radio";
 
 async function musicCall(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<any> {
   let location: { port: number; token: string };
@@ -46,7 +47,9 @@ export class DiscordMusic {
   private selectedVolume?: number;
   private session = "";
   private loading = false;
-  private service: "yandex" | "vk" = "yandex";
+  private service: "yandex" | "vk" | "spotify" = "yandex";
+  private sourcePlaying = true;
+  private spotifyStream = false;
   private job?: { id: string; status: string; result?: unknown; error?: string };
   private hlsOptions = new Map<string, string[]>();
   private bridgeVersion = 0;
@@ -59,9 +62,13 @@ export class DiscordMusic {
   private volumeRevision = 0;
   private readonly volumeInstance = randomBytes(16).toString("hex");
   private syncFinished: Promise<void> = Promise.resolve();
-  constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void, private trace: (text: string) => void = () => {}, private onHealthy: () => void = () => {}) {}
+  private readonly radio: RadioPresenter;
+  constructor(private transport: VoiceTransport, private settings: () => Settings, private note: (text: string, error?: boolean) => void, private trace: (text: string) => void = () => {}, private onHealthy: () => void = () => {}, announce: (track: RadioTrack, signal: AbortSignal) => Promise<void> = async () => {}) {
+    this.radio = new RadioPresenter(settings, announce, text => note(text, true));
+  }
+  cancelRadio(): void { this.radio.cancel(); }
   private healthy(): void { this.error = ""; this.onHealthy(); }
-  state(): Record<string, unknown> { return { following: this.following, loading: this.loading || this.transitioning || this.recovering, recovering: this.recovering, recoveryAttempts: this.recoveryAttempts, paused: this.paused, title: this.title, artist: this.artist, error: this.error, playing: !!this.child && !this.paused && !this.recovering, volume: this.selectedVolume ?? this.settings().musicVolume, volumeRevision: this.volumeRevision, volumeInstance: this.volumeInstance, audio: this.transport.musicStats(), job: this.job }; }
+  state(): Record<string, unknown> { return { following: this.following, service: this.service, loading: this.loading || this.transitioning || this.recovering, recovering: this.recovering, recoveryAttempts: this.recoveryAttempts, paused: this.paused, title: this.title, artist: this.artist, error: this.error, playing: !!this.child && !this.paused && !this.recovering && this.sourcePlaying, volume: this.selectedVolume ?? this.settings().musicVolume, volumeRevision: this.volumeRevision, volumeInstance: this.volumeInstance, audio: this.transport.musicStats(), job: this.job }; }
   beginJob(method: "search" | "playlists" | "play" | "next", value: unknown = {}): unknown {
     if (method === "next" || method === "play") this.trace(`music_button action=${method}`);
     if (this.job?.status === "loading") throw new Error("Дождитесь завершения музыкального действия.");
@@ -81,10 +88,10 @@ export class DiscordMusic {
     const input = value as any;
     const query = String(input?.query || "").trim().slice(0, 200);
     if (!query) throw new Error("Введите название трека или исполнителя.");
-    this.service = input?.service === "vk" ? "vk" : "yandex";
+    this.service = input?.service === "spotify" ? "spotify" : input?.service === "vk" ? "vk" : "yandex";
     const result = await musicCall("search", { service: this.service, query, limit: 10 }); this.healthy(); return result;
   }
-  async playlists(value: unknown): Promise<any> { this.service = (value as any)?.service === "vk" ? "vk" : "yandex"; const result = await musicCall("discord_playlists", { service: this.service }); this.healthy(); return result; }
+  async playlists(value: unknown): Promise<any> { this.service = (value as any)?.service === "spotify" ? "spotify" : (value as any)?.service === "vk" ? "vk" : "yandex"; const result = await musicCall("discord_playlists", { service: this.service }); this.healthy(); return result; }
   async like(): Promise<string> {
     if (!this.following || !this.session || this.revision < 0 || this.recovering || this.transitioning) return "Сначала включите песню в Discord и дождитесь загрузки.";
     if (this.bridgeVersion < 5) return "Для лайков обновите Astra Music до версии 1.1.8 и перезапустите оба плагина.";
@@ -103,7 +110,8 @@ export class DiscordMusic {
     this.session = randomBytes(16).toString("hex"); this.loading = true;
     const input = value as any;
     try {
-      this.service = input?.service === "vk" ? "vk" : "yandex";
+      const provider = input?.service || (!input?.track_id ? (await musicCall('current')).service : 'yandex');
+      this.service = provider === "spotify" ? "spotify" : provider === "vk" ? "vk" : "yandex";
       await musicCall("discord_play", { session: this.session, service: this.service, mode: ["wave", "library", "playlist"].includes(input?.mode) ? input.mode : "track", playlist_id: String(input?.playlist_id || "").slice(0, 200), track_id: String(input?.track_id || "").slice(0, 100), title: String(input?.title || "").slice(0, 200), artist: String(input?.artist || "").slice(0, 200), extra: input?.extra && typeof input.extra === "object" ? input.extra : {} }, this.controller.signal);
       if (epoch !== this.epoch) return { ok: true, cancelled: true };
       this.following = true; this.error = "";
@@ -117,6 +125,7 @@ export class DiscordMusic {
   private setPaused(paused: boolean): void {
     if (paused === this.paused) return;
     this.paused = paused; this.transport.pauseMusic(paused);
+    if (paused) this.radio.cancel();
     if (this.following) this.transport.musicPresence(this.title, this.artist, this.service, paused);
   }
   pause(): { ok: true } { this.setPaused(!this.paused); return { ok: true }; }
@@ -128,6 +137,7 @@ export class DiscordMusic {
     this.selectedVolume = volume; this.volumeRevision++; this.transport.musicVolume(volume); return { ok: true, volumeRevision: this.volumeRevision };
   }
   stop(): { ok: true } {
+    this.radio.reset();
     const session = this.session; this.session = ""; this.loading = false;
     if (session) void musicCall("discord_stop", { session }).catch(() => {});
     this.following = false; this.epoch++; this.controller?.abort(); this.controller = undefined;
@@ -202,13 +212,14 @@ export class DiscordMusic {
     if (!this.following || !this.session) return { ok: true };
     if (this.transitioning || this.recovering) return { ok: true, pending: true };
     this.transitioning = true;
+    this.radio.cancel();
     this.trace(`music_transition source=${finished ? "stream_end" : "command"} direction=${direction < 0 ? -1 : 1} revision=${this.revision}`);
     const epoch = this.epoch;
     const playedSeconds = this.position();
     try {
       await this.syncFinished;
       if (epoch !== this.epoch) return { ok: true, cancelled: true };
-      this.stopDecoder(); this.transport.stopMusic();
+      if (!this.spotifyStream) { this.stopDecoder(); this.transport.stopMusic(); }
       const params: Record<string, unknown> = { session: this.session, revision: this.revision, direction, finished };
       // Earlier running Music instances do not accept this optional argument.
       // Negotiate it from state rather than assuming a source file was reloaded.
@@ -217,7 +228,9 @@ export class DiscordMusic {
       if (epoch !== this.epoch) return { ok: true, cancelled: true };
       if (result.status === "stopped") { this.stop(); return { ok: true, ended: true }; }
       if (result.cancelled) return { ok: true, cancelled: true };
-      this.error = ""; this.revision = -1; await this.sync(true);
+      this.error = "";
+      if (this.spotifyStream) await this.sync(true);
+      else { this.revision = -1; await this.sync(true); }
       return { ok: true };
     } catch (error) {
       if (epoch === this.epoch) {
@@ -228,12 +241,16 @@ export class DiscordMusic {
     } finally { this.transitioning = false; }
   }
   async voice(text: string, allowed: () => boolean, signal: AbortSignal): Promise<string | undefined> {
-    const phrase = text.toLocaleLowerCase("ru").replace(/ё/g, "е").replace(/[.,!?;:]/g, " ").trim()
+    let phrase = text.toLocaleLowerCase("ru").replace(/ё/g, "е").replace(/[.,!?;:]/g, " ").trim()
       .replace(/^(?:астра|астр|остра)\s+/, "").replace(/\s+/g, " ");
+    const spotifyRequest = /(?:\s+(?:в|из|на))?\s+(?:spotify|спотифай|спотифи)$/u.test(phrase);
+    if (spotifyRequest) phrase = phrase.replace(/(?:\s+(?:в|из|на))?\s+(?:spotify|спотифай|спотифи)$/u, '').trim();
     const likeRequest = /^(?:лайк|лайкни(?: (?:песню|трек|эту песню|этот трек|текущую песню|текущий трек))?|поставь лайк(?: (?:песне|треку|песню|трек))?|добавь (?:песню|трек|эту песню|этот трек) в (?:понравившиеся|избранное)|мне нравится (?:эта песня|этот трек))$/u.test(phrase);
-    const control = likeRequest || /^(?:пауза(?: музыки)?|останови музыку|выключи музыку|продолжи музыку|возобнови музыку|следующ(?:ий|ая) (?:трек|песня)|предыдущ(?:ий|ая) (?:трек|песня)|(?:сделай |музыку )?(?:громче|тише)(?: музыку)?|(?:громкость|громкость музыки|установи громкость|сделай громкость|сделай громкость музыки) .+|(?:включи|поставь|запусти) (?:музыку|музыку в дискорде|мою волну|моя волна|мои треки (?:вк|vk)|плейлист .+|(?:песню|трек|музыку) .+)|найди (?:песню|трек|музыку) .+)$/u.test(phrase);
+    const mixRequest = /^(?:включи|поставь|запусти) (?:мой |мою |персональный |ежедневный )?микс$/u.test(phrase);
+    const control = likeRequest || mixRequest || /^(?:пауза(?: музыки)?|останови музыку|выключи музыку|продолжи музыку|возобнови музыку|следующ(?:ий|ая) (?:трек|песня)|предыдущ(?:ий|ая) (?:трек|песня)|(?:сделай |музыку )?(?:громче|тише)(?: музыку)?|(?:громкость|громкость музыки|установи громкость|сделай громкость|сделай громкость музыки) .+|(?:включи|поставь|запусти) (?:музыку|музыку в дискорде|мою волну|моя волна|мои треки (?:вк|vk)|плейлист .+|(?:песню|трек|музыку) .+)|найди (?:песню|трек|музыку) .+)$/u.test(phrase);
     if (!control) return undefined;
     if (!allowed()) return "У этого аккаунта нет доступа к управлению музыкой.";
+    if (spotifyRequest) this.service='spotify';
     signal.throwIfAborted();
     if (likeRequest) return this.like();
     if ((this.loading || this.transitioning || this.recovering || this.job?.status === "loading") && phrase !== "выключи музыку" && phrase !== "останови музыку") return "Дождитесь завершения музыкального действия.";
@@ -252,8 +269,9 @@ export class DiscordMusic {
       this.volume({ level }); return "Громкость " + level + " из десяти.";
     }
     let input: any;
-    if (/^(?:включи|поставь|запусти) музыку(?: в дискорде)?$/u.test(phrase)) input = {};
-    else if (/мо[юя] волн[уа]$/u.test(phrase)) input = { mode: "wave", service: "yandex" };
+    if (/^(?:включи|поставь|запусти) музыку(?: в дискорде)?$/u.test(phrase)) input = spotifyRequest ? {service:'spotify'} : {};
+    else if (/мо[юя] волн[уа]$/u.test(phrase)) input = { mode: "wave", service: spotifyRequest ? "spotify" : "yandex" };
+    else if (mixRequest) input = { mode: "wave", service: "spotify" };
     else if (/мои треки (?:вк|vk)$/u.test(phrase)) input = { mode: "library", service: "vk" };
     else if (phrase.includes("плейлист ")) {
       const wanted = phrase.split("плейлист ")[1];
@@ -290,13 +308,20 @@ export class DiscordMusic {
     this.syncFinished = new Promise<void>(resolve => { finished = resolve; });
     const epoch = this.epoch;
     try {
-      const track = await musicCall("discord_state", { session: this.session }, this.controller?.signal);
+      const radioSettings = this.settings();
+      const wantNext = radioSettings.radioEnabled && radioSettings.radioNext && !this.paused && (radioSettings.radioWhen === "start" || !this.expectedDuration || this.position() >= this.expectedDuration - 35);
+      let track = await musicCall("discord_state", { session: this.session, ...(this.bridgeVersion >= 6 ? { want_next: wantNext } : {}) }, this.controller?.signal);
+      if (wantNext && this.bridgeVersion < 6 && Number(track.bridge_version) >= 6) {
+        track = await musicCall("discord_state", { session: this.session, want_next: true }, this.controller?.signal);
+      }
       if (epoch !== this.epoch || !this.following || (this.transitioning || this.recovering) && !transition) return;
       this.bridgeVersion = Number(track.bridge_version) || 0;
       if (this.revision < 0 && this.bridgeVersion < 4) this.note("Для обновления ссылки при обрыве музыки обновите Astra Music до версии 1.1.7 или новее и перезапустите оба плагина.");
       if (!this.transport.connected) { this.stop(); return; }
       this.title = String(track.title || ""); this.artist = String(track.artist || "");
-      this.service = track.service === "vk" ? "vk" : "yandex";
+      this.service = track.service === "spotify" ? "spotify" : track.service === "vk" ? "vk" : "yandex";
+      this.sourcePlaying = track.service !== 'spotify' || track.spotify_status === 'playing';
+      this.spotifyStream = track.service === 'spotify' && track.codec === 'pcm_s16le';
       if (!track.stream_url || ["stopped", "failed", "idle"].includes(track.status)) { this.stop(); return; }
       if (track.revision !== this.revision) {
         if (!resume) { this.resumeSeconds = 0; this.expectedDuration = 0; this.recoveryAttempts = 0; }
@@ -311,8 +336,10 @@ export class DiscordMusic {
         const hlsOptions = track.service === "vk" ? await this.decoderHlsOptions(executable) : [];
         if (epoch !== this.epoch) return;
         const resumeAt = this.resumeSeconds;
-        const seek = resumeAt > 0 ? ["-ss", resumeAt.toFixed(3)] : [];
-        const child = spawn(executable, ["-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-rw_timeout", "25000000", "-protocol_whitelist", "http,tcp,crypto", ...hlsOptions, ...seek, "-i", url.href, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+        const pcmInput = track.service === 'spotify' && track.codec === 'pcm_s16le';
+        const seek = !pcmInput && resumeAt > 0 ? ["-ss", resumeAt.toFixed(3)] : [];
+        const format = pcmInput ? ['-probesize','8192','-analyzeduration','0','-f','s16le','-ar','48000','-ac','2'] : [];
+        const child = spawn(executable, ["-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-rw_timeout", "25000000", "-protocol_whitelist", "http,tcp,crypto", ...hlsOptions, ...seek, ...format, "-i", url.href, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
         this.child = child;
         this.trace(`music_decoder started revision=${this.revision}`);
         const pcm = new PassThrough({ highWaterMark: 96000 }); this.pcm = pcm;
@@ -374,7 +401,10 @@ export class DiscordMusic {
         this.healthy();
       }
       this.transport.pauseMusic(this.paused);
-      this.transport.musicPresence(this.title, this.artist, this.service, this.paused);
+      this.transport.musicPresence(this.title, this.artist, this.service, this.paused || !this.sourcePlaying);
+      this.radio.observe({ key: `${this.session}:${track.service}:${track.queue_index}:${track.track_id || this.artist + ':' + this.title}`, title: this.title, artist: this.artist, playing: this.decoderAttached && !this.paused && this.sourcePlaying && !this.recovering,
+        next: track.next_track && typeof track.next_track.title === "string" ? {title: track.next_track.title.slice(0,300), artist: typeof track.next_track.artist === "string" ? track.next_track.artist.slice(0,300) : ""} : undefined,
+        position: this.spotifyStream ? Number(track.position_seconds) || 0 : this.position(), duration: this.spotifyStream ? Number(track.duration_seconds) || 0 : this.expectedDuration });
     } finally { this.polling = false; finished(); }
   }
 }

@@ -84,7 +84,7 @@ function formValues() {
   const values = {};
   for (const element of $("settingsForm").elements) {
     if (!element.name) continue;
-    values[element.name] = element.name === "musicVolume" ? Number(element.value) * 10 : element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value;
+    values[element.name] = element.name === "musicVolume" ? Number(element.value) * 10 : element.type === "checkbox" ? element.checked : element.type === "number" || element.name === "radioEvery" ? Number(element.value) : element.value;
   }
   for (const name of clearSecrets) values["clear_" + name] = true;
   if (!values.llmUseAstra) { try { values.llmKeyScope = JSON.stringify([values.llmProviderId, new URL(values.llmBaseUrl).href.replace(/\/+$/, "")]); } catch {} }
@@ -154,6 +154,8 @@ async function action(button, operation) {
 }
 function render(state) {
   snapshot = state;
+  const shift = state.radioShift?.active;
+  $("radioShiftStatus").textContent = shift ? (shift.phase === "starting" ? "Подключение к эфиру: " : "В эфире: ") + shift.name + " · до " + new Date(shift.ends_at * 1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : state.radioShift?.message || "";
   renderDiagnostics(state.diagnostics, state);
   if (!dirty && !document.activeElement?.closest("#settingsForm")) fill(state.settings);
   $("connectionBadge").textContent = labels[state.phase] || "Отключён";
@@ -178,7 +180,7 @@ function render(state) {
   $("musicPause").textContent = music.paused ? "Продолжить" : "Пауза";
   $("musicStop").disabled = !music.following && !music.loading;
   for (const id of ["musicNext", "musicPrevious"]) $(id).disabled = busy || music.loading || !music.following;
-  for (const id of ["musicWave", "musicLibrary"]) $(id).disabled = busy || !state.connected;
+  for (const id of ["musicWave", "musicLibrary", "musicSpotifyMix"]) $(id).disabled = busy || !state.connected;
   if (music.volumeInstance && music.volumeInstance !== volumeInstance) {
     volumeInstance = music.volumeInstance; volumeRevision = 0;
   }
@@ -386,6 +388,10 @@ $("musicStart").onclick = () => action($("musicStart"), async () => { if (dirty)
 $("musicNext").onclick = () => action($("musicNext"), () => musicJob("music_next", { direction: 1 }));
 $("musicPrevious").onclick = () => action($("musicPrevious"), () => musicJob("music_next", { direction: -1 }));
 $("musicWave").onclick = () => action($("musicWave"), async () => { if (dirty) await save(); await musicJob("music_play", { service: "yandex", mode: "wave" }); });
+$("musicSpotifyMix").onclick = () => action($("musicSpotifyMix"), async () => {
+  $("musicService").value = "spotify"; drawPickers();
+  if (dirty) await save(); await musicJob("music_play", { service: "spotify", mode: "wave" });
+});
 $("musicLibrary").onclick = () => action($("musicLibrary"), async () => { if (dirty) await save(); await musicJob("music_play", { service: "vk", mode: "library" }); });
 $("musicPlaylists").onclick = () => action($("musicPlaylists"), async () => {
   const service = $("musicService").value, result = await musicJob("music_playlists", { service });
