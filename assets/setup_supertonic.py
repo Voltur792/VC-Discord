@@ -15,7 +15,7 @@ def main():
         folder = Path(sys.argv[1]) / "supertonic-env"
         send({"status": "Создаём окружение голоса в папке данных пользователя…"})
         venv.EnvBuilder(with_pip=True).create(folder)
-        python = folder / "Scripts" / "python.exe"
+        python = folder / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         send({"status": "Устанавливаем Supertonic и зависимости. Модель голоса остаётся из Astra…"})
         subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check",
                         "--only-binary=:all:", "supertonic==1.3.1"],

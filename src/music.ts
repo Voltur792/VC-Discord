@@ -1,3 +1,4 @@
+import { integrationDir } from "./platform";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -9,10 +10,12 @@ import type { VoiceTransport } from "./voice";
 import { findMusicFFmpeg } from "./music-setup";
 import { RadioPresenter, type RadioTrack } from "./radio";
 
+export type MusicControl = "pause" | "resume" | "stop" | "next" | "previous" | "current";
+
 async function musicCall(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<any> {
   let location: { port: number; token: string };
   try {
-    const folder = process.env.SPT_INTEGRATION_DIR || join(process.env.APPDATA || "", "sleep-pause-timer", "integrations");
+    const folder = integrationDir();
     location = JSON.parse(await readFile(join(folder, "music.json"), "utf8"));
     if (!Number.isInteger(location.port) || location.port < 1 || location.port > 65535 || !/^[A-Za-z0-9_-]{32,100}$/.test(location.token)) throw new Error();
   } catch { throw new Error("Нет связи с Astra Music. Включите обновлённый музыкальный плагин в Astra."); }
@@ -84,12 +87,12 @@ export class DiscordMusic {
     const track = await musicCall("current");
     return { track: { service: track.service, track_id: track.track_id, title: track.title, artist: track.artist } };
   }
-  async search(value: unknown): Promise<unknown> {
+  async search(value: unknown, signal?: AbortSignal): Promise<unknown> {
     const input = value as any;
     const query = String(input?.query || "").trim().slice(0, 200);
     if (!query) throw new Error("Введите название трека или исполнителя.");
     this.service = input?.service === "spotify" ? "spotify" : input?.service === "vk" ? "vk" : "yandex";
-    const result = await musicCall("search", { service: this.service, query, limit: 10 }); this.healthy(); return result;
+    const result = await musicCall("search", { service: this.service, query, limit: 10 }, signal); this.healthy(); return result;
   }
   async playlists(value: unknown): Promise<any> { this.service = (value as any)?.service === "spotify" ? "spotify" : (value as any)?.service === "vk" ? "vk" : "yandex"; const result = await musicCall("discord_playlists", { service: this.service }); this.healthy(); return result; }
   async like(): Promise<string> {
@@ -122,6 +125,14 @@ export class DiscordMusic {
     this.poll = setInterval(() => { void this.sync().catch(() => { if (!this.following || this.epoch !== epoch) return; this.stop(); this.error = "Связь с Astra Music потеряна. Подключите трансляцию заново."; this.note(this.error, true); }); }, 1500);
     return { ok: true };
   }
+  async request(value: unknown, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted();
+    const pending = this.play(value), epoch = this.epoch;
+    const cancel = () => { if (epoch === this.epoch) this.stop(); };
+    signal.addEventListener("abort", cancel, { once: true });
+    try { if (signal.aborted) cancel(); return await pending; }
+    finally { signal.removeEventListener("abort", cancel); }
+  }
   private setPaused(paused: boolean): void {
     if (paused === this.paused) return;
     this.paused = paused; this.transport.pauseMusic(paused);
@@ -129,6 +140,29 @@ export class DiscordMusic {
     if (this.following) this.transport.musicPresence(this.title, this.artist, this.service, paused);
   }
   pause(): { ok: true } { this.setPaused(!this.paused); return { ok: true }; }
+  async control(action: MusicControl, allowed: () => boolean, signal: AbortSignal): Promise<string> {
+    if (signal.aborted || !allowed()) throw new Error("Музыкальная команда отменена.");
+    if (action === "current") return this.following && this.title ? `${this.paused ? "На паузе" : "Сейчас играет"}: ${this.artist ? this.artist + " — " : ""}${this.title}.` : "Сейчас музыка в Discord не играет.";
+    if (!this.following && !this.loading) throw new Error("Сейчас музыка в Discord не включена. Закажите песню: !play исполнитель — название.");
+    if (action === "stop") { this.stop(); return "Музыка в Discord остановлена."; }
+    if (this.loading || this.transitioning || this.recovering || this.job?.status === "loading") throw new Error("Дождитесь завершения музыкального действия.");
+    if (action === "pause" || action === "resume") {
+      this.setPaused(action === "pause");
+      return action === "pause" ? "Музыка в Discord на паузе." : "Продолжаю музыку в Discord.";
+    }
+    const epoch = this.epoch;
+    // Cancel only this music session, never a newer owner/scheduled session.
+    const cancel = () => { if (epoch === this.epoch) this.stop(); };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const result = await this.next(false, action === "previous" ? -1 : 1, () => allowed() && !signal.aborted) as { cancelled?: boolean; pending?: boolean; ended?: boolean };
+      if (signal.aborted || !allowed() || result.cancelled) throw new Error("Музыкальная команда отменена.");
+      if (result.pending) throw new Error("Дождитесь завершения музыкального действия.");
+      if (result.ended) return "Очередь закончилась. Музыка в Discord остановлена.";
+      if (!this.following) throw new Error("Не удалось продолжить музыку. Закажите песню заново: !play исполнитель — название.");
+      return this.title ? `Переключила трек: ${this.artist ? this.artist + " — " : ""}${this.title}.${this.paused ? " Музыка остаётся на паузе." : ""}` : "Трек переключён.";
+    } finally { signal.removeEventListener("abort", cancel); }
+  }
   volume(value: unknown): { ok: true; volumeRevision: number } {
     const input = value as any;
     // Keep old percent calls working; the current UI and voice use level 0–10.
@@ -208,7 +242,8 @@ export class DiscordMusic {
       } catch { /* next() reports a bridge error with a user-facing explanation. */ }
     })().catch(() => { if (epoch === this.epoch && !signal.aborted) { this.stop(); this.error = "Не удалось восстановить музыку. Проверьте подключение Astra Music."; this.note(this.error, true); } });
   }
-  async next(finished = false, direction = 1): Promise<unknown> {
+  async next(finished = false, direction = 1, allowed: () => boolean = () => true): Promise<unknown> {
+    if (!allowed()) return { ok: true, cancelled: true };
     if (!this.following || !this.session) return { ok: true };
     if (this.transitioning || this.recovering) return { ok: true, pending: true };
     this.transitioning = true;
@@ -219,6 +254,7 @@ export class DiscordMusic {
     try {
       await this.syncFinished;
       if (epoch !== this.epoch) return { ok: true, cancelled: true };
+      if (!allowed()) return { ok: true, cancelled: true };
       if (!this.spotifyStream) { this.stopDecoder(); this.transport.stopMusic(); }
       const params: Record<string, unknown> = { session: this.session, revision: this.revision, direction, finished };
       // Earlier running Music instances do not accept this optional argument.
@@ -226,13 +262,17 @@ export class DiscordMusic {
       if (this.bridgeVersion >= 2) params.played_seconds = playedSeconds;
       const result = await musicCall("discord_next", params, this.controller?.signal);
       if (epoch !== this.epoch) return { ok: true, cancelled: true };
+      if (!allowed()) { this.stop(); return { ok: true, cancelled: true }; }
       if (result.status === "stopped") { this.stop(); return { ok: true, ended: true }; }
       if (result.cancelled) return { ok: true, cancelled: true };
       this.error = "";
       if (this.spotifyStream) await this.sync(true);
       else { this.revision = -1; await this.sync(true); }
+      if (epoch !== this.epoch) return { ok: true, cancelled: true };
+      if (!allowed()) { this.stop(); return { ok: true, cancelled: true }; }
       return { ok: true };
     } catch (error) {
+      if (!allowed()) { if (epoch === this.epoch) this.stop(); return { ok: true, cancelled: true }; }
       if (epoch === this.epoch) {
         this.stop(); this.error = "Не удалось включить следующий трек.";
         this.note(this.error, true);

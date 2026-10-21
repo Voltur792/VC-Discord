@@ -25,10 +25,16 @@ export class RadioShiftSession {
   private starting = false;
   private timer?: NodeJS.Timeout;
   private message = "";
+  private recoverySince?: number;
+  private recoveryWork?: RadioShift;
   constructor(private allowed: () => boolean, private connected: () => boolean,
     private begin: (shift: RadioShift, valid: () => boolean) => Promise<void>, private end: () => void,
-    private now: () => number = Date.now) {}
-  state(): Record<string, unknown> { return { allowed: this.allowed(), active: this.active ? { ...this.active, phase: this.starting ? "starting" : "playing" } : null, message: this.message }; }
+    private now: () => number = Date.now, private recovery?: {
+      pending: () => boolean;
+      resume: (shift: RadioShift, valid: () => boolean) => Promise<void>;
+      trace?: (code: string) => void;
+    }) {}
+  state(): Record<string, unknown> { return { allowed: this.allowed(), active: this.active ? { ...this.active, phase: this.starting ? "starting" : this.recoverySince !== undefined || this.recoveryWork === this.active ? "recovering" : "playing" } : null, message: this.message }; }
   async start(value: unknown): Promise<Record<string, unknown>> {
     const shift = validateRadioShift(value, this.now());
     if (!this.allowed()) throw new Error("Разрешите автоматические эфиры в разделе «Музыка» Discord-плагина.");
@@ -50,6 +56,7 @@ export class RadioShiftSession {
   stop(runId?: string): { ok: true; stopped: boolean } {
     if (!this.active || runId && runId !== this.active.run_id) return { ok: true, stopped: false };
     this.active = undefined;
+    this.recoverySince = undefined; this.recoveryWork = undefined;
     if (this.timer) clearInterval(this.timer); this.timer = undefined;
     this.message = "Смена завершена"; this.end();
     return { ok: true, stopped: true };
@@ -57,6 +64,26 @@ export class RadioShiftSession {
   tick(): void {
     if (!this.active) return;
     if (!this.allowed() || this.now() >= this.active.ends_at * 1000) { this.stop(); return; }
-    if (!this.starting && !this.connected()) { this.stop(); this.message = "Эфир прерван: бот отключён от канала."; }
+    if (this.starting || this.recoveryWork === this.active) return;
+    if (!this.connected()) {
+      if (this.recovery?.pending()) {
+        if (this.recoverySince === undefined) { this.recoverySince = this.now(); this.recovery.trace?.("RADIO_CONNECTION_RECOVERING"); }
+        if (this.now() - this.recoverySince < 30000) { this.message = "Восстанавливаю голосовое соединение; смена остаётся по расписанию."; return; }
+        this.recovery.trace?.("RADIO_CONNECTION_RECOVERY_TIMEOUT");
+        this.stop(); this.message = "Эфир прерван: голосовое соединение не восстановилось за 30 секунд."; return;
+      }
+      this.recovery?.trace?.("RADIO_CONNECTION_ENDED");
+      this.stop(); this.message = "Эфир прерван: бот отключён от канала."; return;
+    }
+    if (this.recoverySince !== undefined && this.recovery) {
+      const shift = this.active;
+      this.recoverySince = undefined; this.recoveryWork = shift;
+      const valid = () => this.active === shift && this.allowed() && this.connected() && this.now() < shift.ends_at * 1000;
+      void this.recovery.resume(shift, valid).then(() => {
+        if (valid()) { this.message = "Голосовое соединение восстановлено, радиоведущая продолжает смену."; this.recovery?.trace?.("RADIO_CONNECTION_RECOVERED"); }
+      }).catch(() => {
+        if (this.active === shift) { this.recovery?.trace?.("RADIO_MUSIC_RECOVERY_FAILED"); this.stop(shift.run_id); this.message = "Не удалось возобновить музыку после восстановления связи."; }
+      }).finally(() => { if (this.recoveryWork === shift) this.recoveryWork = undefined; });
+    }
   }
 }

@@ -10,15 +10,17 @@ export async function discoverDiscord(s: Settings): Promise<Record<string, any>>
     if (!client.application) throw new Error("Discord не предоставил сведения о приложении бота. Повторите поиск.");
     const application = await client.application.fetch();
     if (application.botRequireCodeGrant) throw new Error("У бота включён Requires OAuth2 Code Grant. Откройте Discord Developer Portal → ваше приложение → Bot → Authorization Flow, выключите этот переключатель и нажмите Save Changes. Затем повторите поиск.");
-    const inviteUrl = client.generateInvite({ scopes: [OAuth2Scopes.Bot], permissions: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak] });
+    const inviteUrl = client.generateInvite({ scopes: [OAuth2Scopes.Bot], permissions: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
     const guilds = [...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name }));
     const selected = guilds.find(g => g.id === s.guildId) || (guilds.length === 1 ? guilds[0] : undefined);
     const channels: { id: string; name: string }[] = [];
+    const textChannels: { id: string; name: string }[] = [];
     if (selected) {
       const guild = await client.guilds.fetch(selected.id), me = await guild.members.fetchMe();
       const collection = await guild.channels.fetch();
       for (const channel of collection.values()) if (channel?.type === ChannelType.GuildVoice && channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak])) channels.push({ id: channel.id, name: channel.name });
+      for (const channel of collection.values()) if (channel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type) && channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory])) textChannels.push({ id: channel.id, name: channel.name });
     }
-    return { inviteUrl, guilds, channels, guildId: selected?.id || "", channelId: channels.some(c => c.id === s.channelId) ? s.channelId : channels.length === 1 ? channels[0].id : "" };
+    return { inviteUrl, guilds, channels, textChannels, guildId: selected?.id || "", channelId: channels.some(c => c.id === s.channelId) ? s.channelId : channels.length === 1 ? channels[0].id : "" };
   } finally { clearTimeout(timer); client.destroy(); }
 }

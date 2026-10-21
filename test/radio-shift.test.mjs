@@ -68,6 +68,74 @@ test('cancelled shift cannot connect after slow speech provider preparation',asy
  bridge.diagnostics.stop();
 });
 
+test('public requests cannot replace scheduled music while search and conversation stay separate',async()=>{
+ const bridge=new core.VoiceBridge();bridge.settings=core.normalizeSettings({textMusicEnabled:true,textEnabled:true,textSummonEnabled:true});
+ let plays=0;bridge.music={request:async()=>{plays++;return {};}};
+ bridge.radioShift.active=shift({ends_at:Date.now()/1000+120});
+ await assert.rejects(bridge.publicPlay({service:'vk',mode:'playlist',playlist_id:'-123:456:hash'},{},()=>true,new AbortController().signal),/Идёт смена/);
+ assert.equal(plays,0);bridge.radioShift.active=undefined;bridge.diagnostics.stop();
+});
+
+test('a confirmed scheduled start announces once with start, end and voice destination, even when AI chat is disabled',async()=>{
+ const bridge=new core.VoiceBridge();let connected=false,plays=0;const sent=[];
+ bridge.settings=core.normalizeSettings({radioScheduleEnabled:true,textEnabled:true,textChatEnabled:false,guildId:'111111111111111111',textChannelId:'666666666666666666'});
+ bridge.transport={get connected(){return connected;},disconnect:()=>{connected=false;}};
+ bridge.connect=async valid=>{assert.ok(valid());connected=true;};
+ bridge.music={play:async()=>{plays++;return {};},stop:()=>{}};bridge.providers={stop:()=>{}};
+ bridge.textDiscord.announce=async(content,valid)=>{assert.ok(valid());sent.push(content);return true;};
+ const data=shift({ends_at:Date.now()/1000+120});
+ await bridge.startRadio(data);await bridge.startRadio(data);
+ assert.equal(plays,1);assert.equal(sent.length,1);assert.match(sent[0],/Начала работу по расписанию/);assert.match(sent[0],/Начало:/);
+ assert.ok(sent[0].includes(`<#${data.channel_id}>`));assert.ok(sent[0].includes(bridge.radioDate(data.ends_at*1000)));assert.match(sent[0],/UTC\+5/);
+ bridge.radioShift.stop();bridge.diagnostics.stop();
+});
+
+test('failed playback and disabled announcements never announce a start; a failed send does not stop the broadcast',async()=>{
+ for(const kind of ['failed-play','disabled','failed-send']){
+  const bridge=new core.VoiceBridge();let connected=false,sends=0;
+  bridge.diagnostics.stop();bridge.settings=core.normalizeSettings({radioScheduleEnabled:true,radioScheduleAnnounce:kind!=='disabled',textEnabled:true,guildId:'111111111111111111',textChannelId:'666666666666666666'});
+  bridge.transport={get connected(){return connected;},disconnect:()=>{connected=false;}};
+  bridge.connect=async()=>{connected=true;};bridge.providers={stop:()=>{}};
+  bridge.music={play:async()=>{if(kind==='failed-play')throw new Error('Не удалось включить музыку.');return {};},stop:()=>{}};
+  bridge.textDiscord.announce=async()=>{sends++;throw new Error('Нет доступа к текстовому каналу.');};
+  const pending=bridge.startRadio(shift({ends_at:Date.now()/1000+120}));
+  if(kind==='failed-play')await assert.rejects(pending,/Не удалось включить/);else await pending;
+  assert.equal(sends,kind==='failed-send'?1:0);assert.equal(!!bridge.radioShift.active,kind!=='failed-play');
+  bridge.radioShift.stop();
+ }
+});
+
+test('schedule priority takes over a publicly summoned session, preserves settings and leaves text online',async()=>{
+ const bridge=new core.VoiceBridge();let connected=true,stops=0,played=0;
+ bridge.settings=core.normalizeSettings({botToken:'test-token',guildId:'111111111111111111',textChannelId:'666666666666666666',radioScheduleEnabled:true,textEnabled:true,textSummonEnabled:true,channelId:'444444444444444444'});
+ bridge.summonedChannelId='555555555555555555';const before={...bridge.settings};let resets=0;
+ bridge.textRoom={reset:()=>resets++};bridge.transport={get connected(){return connected;},disconnect:()=>{stops++;connected=false;},connect:async()=>{connected=true;}};
+ bridge.providers={stop:()=>{}};bridge.music={play:async()=>{played++;return {};},cancelRadio:()=>{}};
+ await bridge.startRadio(shift({ends_at:Date.now()/1000+120}));assert.equal(played,1);assert.equal(stops,1);assert.equal(resets,1);
+ assert.equal(bridge.summonedChannelId,'');assert.deepEqual(bridge.settings,before);
+ bridge.radioShift.stop();assert.equal(stops,2);assert.equal(bridge.settings.textEnabled,true);bridge.diagnostics.stop();
+});
+
+test('disabled schedule priority and manual sessions keep their voice connection',async()=>{
+ for(const [takeover,summoned] of [[false,true],[true,false]]) {
+  const bridge=new core.VoiceBridge();bridge.settings=core.normalizeSettings({radioScheduleEnabled:true,radioScheduleTakeover:takeover});bridge.summonedChannelId=summoned?'555555555555555555':'';
+  let stopped=0;bridge.transport={connected:true,disconnect:()=>stopped++};
+  await assert.rejects(bridge.startRadio(shift({ends_at:Date.now()/1000+120})),/уже занят/);assert.equal(stopped,0);bridge.diagnostics.stop();
+ }
+});
+
+test('takeover waits for old summon cleanup before starting a new scheduled connection',async()=>{
+ const bridge=new core.VoiceBridge();let release,cleaned=false,starts=0;
+ bridge.settings=core.normalizeSettings({radioScheduleEnabled:true});bridge.summonedChannelId='555555555555555555';
+ bridge.transport={connected:false,disconnect:()=>{}};bridge.providers={stop:()=>{}};
+ bridge.publicJoinWork=new Promise(r=>{release=()=>{cleaned=true;r('cancelled');};});
+ bridge.connect=async()=>{assert.equal(cleaned,true);starts++;};bridge.music={play:async()=>({})};
+ // The session checks connected after the start callback; emulate a live connection.
+ bridge.connect=async()=>{assert.equal(cleaned,true);starts++;bridge.transport.connected=true;};
+ const pending=bridge.startRadio(shift({ends_at:Date.now()/1000+120}));assert.equal(starts,0);release();await pending;
+ assert.equal(starts,1);bridge.radioShift.stop();bridge.diagnostics.stop();
+});
+
 test('local timer bridge authenticates, limits methods and preserves another descriptor on close',async t=>{
  const project=resolve(import.meta.dirname,'..'),folder=await mkdtemp(join(project,'.tmp-radio-'));
  const old=process.env.SPT_INTEGRATION_DIR;process.env.SPT_INTEGRATION_DIR=folder;

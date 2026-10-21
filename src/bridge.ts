@@ -1,3 +1,4 @@
+import { astraConfig, astraData } from "./platform";
 import { randomUUID } from "node:crypto";
 import { findVoicePython } from "./voice-runtime";
 import { importVoiceJson, readVoiceJson } from "./custom-voice";
@@ -13,15 +14,19 @@ import { astraRecognition, astraChat, astraConnections, astraPersonality, chatSe
 import { WhisperWorker } from "./whisper";
 import { discoverDiscord } from "./discord-setup";
 import { BrowserScreen, visionBase, openScreenPicker } from "./screen";
-import { DiscordMusic } from "./music";
+import { DiscordMusic, type MusicControl } from "./music";
 import { MusicSetup } from "./music-setup";
 import { Diagnostics } from "./diagnostics";
 import { WindowsServiceError } from "./process";
 import { VoiceModeration } from "./moderation";
 import { ReportExport } from "./report-export";
 import { radioPrompt, type RadioTrack } from "./radio";
-import { RadioShiftSession } from "./radio-shift";
+import { RadioShiftSession, validateRadioShift, type RadioShift } from "./radio-shift";
 import { TimerIntegration } from "./timer-integration";
+import { TextRoom, PublicRoomNotice, type RoomMessage, type MusicSelection } from "./text-room";
+import { TextDiscord } from "./text-discord";
+import { PublicVoiceExit } from "./public-voice";
+import { networkErrorCode } from "./network-error";
 
 interface Job { speaker: Speaker; pcm: Buffer; createdAt: number }
 interface Pending { id: string; speaker: Speaker; command: string; expiresAt: number }
@@ -37,6 +42,12 @@ export class VoiceBridge {
   private settings: Settings = normalizeSettings({});
   private providers = new Providers();
   private connectPending = false;
+  private summonedChannelId = "";
+  private readonly publicVoiceExit = new PublicVoiceExit();
+  private publicVoiceExitTimer?: NodeJS.Timeout;
+  private publicJoinWork?: Promise<string>;
+  private radioStarting = false;
+  private pendingRadioShift?: RadioShift;
   private setup = new LocalSetup();
   private whisperSetup = new WhisperSetup();
   private supertonicSetup = new SupertonicSetup();
@@ -49,8 +60,9 @@ export class VoiceBridge {
   openDiagnosticFolder(): Promise<unknown> { return this.reportExport.openFolder(); }
   recordError(error: unknown, action = "ui"): void {
     this.diagnostics.record(error);
-    this.note(this.errorMessage(error), true, action.startsWith("music_") ? "music" : action === "save" ? "settings" : undefined);
-    const code = error instanceof WindowsServiceError ? `${error.code}; action=${error.action}; exit=${error.exitCode ?? "unknown"}` : "UI_ACTION_FAILED";
+    const network = networkErrorCode(error);
+    this.note(this.errorMessage(error), true, action.startsWith("music_") ? "music" : action === "save" ? "settings" : action === "text_discord" && network ? "text_network" : undefined);
+    const code = error instanceof WindowsServiceError ? `${error.code}; action=${error.action}; exit=${error.exitCode ?? "unknown"}` : `${network || "UI_ACTION_FAILED"}; action=${action}`;
     void this.ctx?.log("warn", `VC-Discord: ${code}`).catch(() => {});
   }
   private recognitionImport?: WhisperWorker;
@@ -63,7 +75,7 @@ export class VoiceBridge {
   private phase = "offline";
   private status = "Готов к настройке";
   private lastError = "";
-  private lastErrorSource?: "voice_receive" | "music" | "settings";
+  private lastErrorSource?: "voice_receive" | "voice_connection" | "music" | "settings" | "text_network";
   private loadError = "";
   private configSaving = false;
   private history: ChatMessage[] = [];
@@ -89,12 +101,13 @@ export class VoiceBridge {
     (speaker, pcm) => this.enqueue(speaker, pcm),
     (message, error, source) => {
       this.status = message;
-      if (source === "voice_receive" && !error && this.lastErrorSource === source) { this.lastError = ""; this.lastErrorSource = undefined; }
+      if ((source === "voice_receive" || source === "voice_connection") && !error && this.lastErrorSource === source) { this.lastError = ""; this.lastErrorSource = undefined; }
       this.note(message, !!error, source);
       if (source === "voice_receive") { const code = error ? message.match(/\bOPUS_[A-Z_]+\b/)?.[0] || "VOICE_RECEIVE_FAILED" : "VOICE_RECEIVE_RECOVERED"; void this.ctx?.log(error ? "warn" : "info", `VC-Discord: ${code}`).catch(() => {}); }
     },
     () => { this.music.cancelRadio(); if (this.phase === "speaking" || this.phase === "thinking") this.controller?.abort(); },
     () => this.cancelWaiting(),
+    (code, error) => { void this.ctx?.log(error ? "warn" : "info", `VC-Discord: ${code}`).catch(() => {}); },
   );
   private readonly gate = new CommandGate(() => this.settings, speaker => !this.configSaving && this.transport.present(speaker), text => this.nativeCommand(text));
   private readonly music = new DiscordMusic(this.transport, () => this.effectiveSettings(), (text, error) => this.note(text, error, "music"), text => { void this.ctx?.log("info", `VC-Discord: ${text}`).catch(() => {}); }, () => {
@@ -107,7 +120,19 @@ export class VoiceBridge {
       const result = await this.music.play(shift.music) as { cancelled?: boolean };
       if (!valid() || result.cancelled || !this.transport.connected) throw new Error("Не удалось подтвердить воспроизведение эфира.");
       this.note("Радиоведущая на смене: " + shift.name);
-    }, () => this.disconnectCore());
+      void this.announceScheduledStart(shift, valid);
+    }, () => this.disconnectCore(), Date.now, {
+      pending: () => this.transport.recovering,
+      resume: async (shift, valid) => {
+        if (!valid()) return;
+        if (!this.music.state().following) {
+          const result = await this.music.play(shift.music.service === "spotify" ? { service: "spotify" } : shift.music) as { cancelled?: boolean };
+          if (result.cancelled || !valid()) throw new Error("Восстановление эфира отменено.");
+        }
+        this.note("Голосовая связь восстановлена, продолжаю смену «" + shift.name + "».");
+      },
+      trace: code => { void this.ctx?.log("info", `VC-Discord: ${code}`).catch(() => {}); },
+    });
   private readonly timerIntegration = new TimerIntegration({
     radio_state: () => this.radioState(),
     radio_defaults: () => ({ ...this.radioState(), guild_id: this.settings.guildId, channel_id: this.settings.channelId, channels: this.transport.moderationRooms() }),
@@ -118,7 +143,7 @@ export class VoiceBridge {
       return { guilds: result.guilds, channels: result.channels, guild_id: result.guildId, channel_id: result.channelId };
     },
     radio_enable: () => this.save({ radioScheduleEnabled: true }),
-    radio_start: params => this.radioShift.start(params),
+    radio_start: params => this.startRadio(params),
     radio_stop: params => {
       if (!/^[a-f0-9]{32}$/.test(String(params.run_id || ""))) throw new Error("Некорректный идентификатор эфира.");
       return this.radioShift.stop(params.run_id);
@@ -128,10 +153,153 @@ export class VoiceBridge {
     const state = this.radioShift.state();
     return { ...state, message: this.errorMessage(new Error(String(state.message || ""))) };
   }
+  private async startRadio(value: unknown): Promise<Record<string, unknown>> {
+    const shift = validateRadioShift(value);
+    if (!this.settings.radioScheduleEnabled) throw new Error("Разрешите автоматические эфиры в разделе «Музыка» Discord-плагина.");
+    if (this.radioStarting) throw new Error("Смена уже подключается.");
+    this.radioStarting = true;
+    this.pendingRadioShift = shift;
+    try {
+      if (!this.radioShift.active && this.settings.radioScheduleTakeover && (this.summonedChannelId || this.publicJoinWork)) {
+        const joining = this.publicJoinWork;
+        // Revoke public work before disconnecting, including delayed searches
+        // and voice preparation. Await the old join so its cleanup cannot stop
+        // the new scheduled session.
+        this.textRoom.reset();
+        if (this.summonedChannelId) this.disconnectCore();
+        await joining?.catch(() => {});
+      }
+      return await this.radioShift.start(shift);
+    } finally { this.radioStarting = false; this.pendingRadioShift = undefined; }
+  }
   private effectiveSettings(): Settings {
     const shift = this.radioShift?.active;
     return shift ? { ...this.settings, guildId: shift.guild_id, channelId: shift.channel_id,
-      radioEnabled: true, radioEvery: shift.every, radioWhen: shift.when, radioNext: shift.announce_next, radioSkipEmpty: shift.skip_empty } : this.settings;
+      radioEnabled: true, radioEvery: shift.every, radioWhen: shift.when, radioNext: shift.announce_next, radioSkipEmpty: shift.skip_empty } : this.summonedChannelId ? { ...this.settings, channelId: this.summonedChannelId } : this.settings;
+  }
+  private readonly textRoom = new TextRoom(() => this.settings, {
+    join: (message, valid) => this.publicJoin(message, valid),
+    leave: (message, valid) => this.publicLeave(message, valid),
+    play: (selection, message, valid, signal) => this.publicPlay(selection, message, valid, signal),
+    volume: (change, _message, valid) => this.publicVolume(change, valid),
+    control: (action, _message, valid, signal) => this.publicMusicControl(action, valid, signal),
+    search: async (query, service, signal) => {
+      const result = await this.music.search({ query, service }, signal) as { tracks?: MusicSelection[] };
+      return (result.tracks || []).filter(track => track.service === service && typeof track.track_id === "string");
+    },
+    chat: async (messages, signal) => {
+      const settings = { ...await chatSettings(this.settings), llmUseAstra: false };
+      const personality = await astraPersonality(settings);
+      // Public channel history is the only conversation sent to this model.
+      if (personality) messages = [{ role: "system", content: "Описание личности Astra:\n" + personality }, ...messages];
+      return publicChat(settings, messages, signal);
+    },
+    error: error => this.errorMessage(error),
+    reportError: error => this.recordError(error, "text_discord"),
+    recovered: () => {
+      if (this.lastErrorSource === "text_network") { this.lastError = ""; this.lastErrorSource = undefined; this.note("Связь с текстовым чатом восстановлена."); }
+    },
+  });
+  private readonly textDiscord = new TextDiscord(() => this.settings, this.textRoom, error => this.recordError(error, "text_discord"));
+  clearTextHistory(): Promise<unknown> { return this.textRoom.clear(); }
+  restartText(): { ok: true } { this.startText(); return { ok: true }; }
+  private startText(): void { void this.textDiscord.start().catch(error => { if (!this.closing && this.settings.textEnabled) this.recordError(error, "text_discord"); }); }
+  private async publicJoin(message: RoomMessage, valid: () => boolean): Promise<string> {
+    if (this.publicJoinWork) throw new Error("Бот уже обрабатывает призыв.");
+    const operation = this.performPublicJoin(message, valid);
+    this.publicJoinWork = operation;
+    try { return await operation; }
+    finally { if (this.publicJoinWork === operation) this.publicJoinWork = undefined; }
+  }
+  private async performPublicJoin(message: RoomMessage, valid: () => boolean): Promise<string> {
+    if (!valid() || !this.settings.textSummonEnabled) throw new Error("Призыв отменён.");
+    this.checkPublicRadio("join");
+    const channel = await this.textDiscord.voiceChannelFor(message);
+    if (!valid()) throw new Error("Призыв отменён.");
+    this.checkPublicRadio("join");
+    if (this.transport.connected) {
+      if (this.effectiveSettings().channelId === channel.id) return "Я уже в вашем голосовом канале.";
+      throw new Error("Я уже занята в другом голосовом канале. Призыв не прерывает текущий разговор или эфир.");
+    }
+    if (this.connectPending || this.radioShift.active) throw new Error("Бот занят подключением или запланированным эфиром.");
+    this.summonedChannelId = channel.id;
+    try {
+      await this.connect(() => valid() && this.settings.textSummonEnabled);
+      const actual = await this.textDiscord.voiceChannelFor(message);
+      if (!valid() || !this.settings.textSummonEnabled || actual.id !== channel.id) throw new Error("Призыв отменён: участник сменил канал или настройка отключена.");
+      this.startPublicVoiceExit(channel.id);
+      return "Я в голосовом канале «" + channel.name + "».";
+    } catch (error) { this.disconnectCore(); throw error; }
+  }
+  private canPublicVoiceLeave(userId: string): boolean {
+    return !this.configSaving && this.settings.publicVoiceLeaveEnabled && !!this.summonedChannelId && !this.radioStarting && !this.radioShift.active && this.transport.connected && this.transport.participants().some(person => person.id === userId);
+  }
+  private async publicLeave(message: RoomMessage, valid: () => boolean): Promise<string> {
+    if (!valid() || !this.settings.textEnabled || message.guildId !== this.settings.guildId || message.channelId !== this.settings.textChannelId) throw new Error("Команда выхода отменена.");
+    this.checkPublicRadio("leave");
+    if (!this.summonedChannelId) throw new Error("Этот сеанс запущен владельцем. Завершить его можно из настроек или разрешённого аккаунта голосом.");
+    if (!this.canPublicVoiceLeave(message.userId)) throw new Error("Для выхода нужно разрешение владельца на публичную команду и присутствие в том же голосовом канале, что и бот.");
+    if (!valid()) throw new Error("Команда выхода отменена.");
+    this.disconnectCore(); this.note("Публичный голосовой сеанс завершён участником канала.");
+    return "Вышла из голосового канала. Текстовый чат остаётся доступным.";
+  }
+  private startPublicVoiceExit(channelId: string): void {
+    this.stopPublicVoiceExit(); this.publicVoiceExit.start(channelId);
+    this.publicVoiceExitTimer = setInterval(() => this.checkPublicVoiceExit(), 1000);
+    this.publicVoiceExitTimer.unref();
+    this.checkPublicVoiceExit();
+  }
+  private stopPublicVoiceExit(): void { clearInterval(this.publicVoiceExitTimer); this.publicVoiceExitTimer = undefined; this.publicVoiceExit.stop(); }
+  private checkPublicVoiceExit(): void {
+    const leave = this.publicVoiceExit.tick(this.settings, { channelId: this.summonedChannelId, connected: this.transport.connected,
+      radio: this.radioStarting || !!this.radioShift.active, listeners: this.transport.participants?.().length || 0 });
+    if (leave && !this.configSaving) { this.disconnectCore(); this.note("Вышла из пустого голосового канала по таймеру публичного сеанса."); }
+  }
+  private async publicPlay(selection: MusicSelection, message: RoomMessage, valid: () => boolean, signal: AbortSignal): Promise<string> {
+    if (!valid() || !this.settings.textMusicEnabled) throw new Error("Заказ музыки отменён.");
+    this.checkPublicRadio();
+    if (!this.transport.connected) {
+      if (!this.settings.textSummonEnabled) throw new Error("Бот не в голосовом канале. Владелец может подключить его в настройках или разрешить призыв.");
+      await this.publicJoin(message, valid);
+    }
+    if (!valid()) throw new Error("Заказ музыки отменён.");
+    this.checkPublicRadio();
+    const result = await this.music.request(selection, signal) as { cancelled?: boolean };
+    if (!valid() || result.cancelled) throw new Error("Заказ музыки отменён.");
+    return "Включаю " + (selection.title ? `${selection.artist || ""} — ${selection.title}` : selection.mode === "playlist" ? `плейлист ${{ yandex: "Яндекс Музыки", vk: "VK", spotify: "Spotify" }[selection.service]} по ссылке` : selection.service === "spotify" ? "персональный микс Spotify" : selection.mode === "wave" ? "«Мою волну» Яндекса" : "музыку") + " в Discord.";
+  }
+  private async publicVolume(change: import("./text-room").VolumeChange, valid: () => boolean): Promise<string> {
+    if (!valid() || !this.settings.textMusicEnabled) throw new Error("Изменение громкости отменено.");
+    this.checkPublicRadio();
+    if (!this.transport.connected) throw new Error("Бот не в голосовом канале. Сначала подключите его или позовите: Астра, зайди ко мне.");
+    const current = Number(this.music.state().volume) / 10;
+    const level = "level" in change ? change.level : Math.max(0, Math.min(10, current + change.delta));
+    this.music.volume({ level });
+    return `Громкость музыки в Discord — ${Number(this.music.state().volume) / 10} из 10.`;
+  }
+  private radioDate(milliseconds: number): string {
+    return new Date(milliseconds).toLocaleString("ru-RU", { timeZone: "Asia/Yekaterinburg", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) + " (UTC+5, Екатеринбург)";
+  }
+  private checkPublicRadio(action: "music" | "join" | "leave" = "music"): void {
+    const shift = this.radioShift.active || this.pendingRadioShift;
+    if (!shift && !this.radioStarting) return;
+    const reason = shift ? `${this.radioStarting ? "Начинается" : "Идёт"} смена по расписанию «${shift.name}» в голосовом канале <#${shift.channel_id}>. Работаю до ${this.radioDate(shift.ends_at * 1000)}.` : "Начинается смена по расписанию.";
+    const restriction = action === "join" ? "До окончания смены перейти в другой канал не могу." : action === "leave" ? "Публичная команда выхода не прерывает смену радиоведущей." : "Менять музыку из общего канала можно после эфира.";
+    throw new PublicRoomNotice(`${reason} ${restriction} Поиск музыки и текстовый чат доступны.`);
+  }
+  private async announceScheduledStart(shift: RadioShift, valid: () => boolean): Promise<void> {
+    const allowed = () => valid() && !this.closing && this.settings.radioScheduleAnnounce && this.settings.textEnabled && this.settings.guildId === shift.guild_id;
+    if (!allowed()) return;
+    const content = `Начала работу по расписанию: смена «${shift.name}».\nГолосовой канал: <#${shift.channel_id}>.\nНачало: ${this.radioDate(Date.now())}.\nРаботаю до ${this.radioDate(shift.ends_at * 1000)}.`;
+    try { await this.textDiscord.announce(content, allowed); }
+    catch (error) { if (allowed()) this.recordError(error, "radio_announcement"); }
+  }
+  private async publicMusicControl(action: MusicControl, valid: () => boolean, signal: AbortSignal): Promise<string> {
+    const allowed = () => valid() && this.settings.textMusicEnabled && (action === "current" || !this.radioStarting && !this.radioShift.active);
+    if (!valid() || !this.settings.textMusicEnabled || signal.aborted) throw new Error("Музыкальная команда отменена.");
+    if (action !== "current") this.checkPublicRadio();
+    if (!this.transport.connected) throw new Error("Бот не в голосовом канале. Сначала подключите его или позовите: Астра, зайди ко мне.");
+    return this.music.control(action, allowed, signal);
   }
   private readonly moderation = new VoiceModeration(() => this.settings, this.transport, () => this.configSaving, (text, error) => this.note(text, error));
   musicCurrent(): Promise<unknown> { return this.music.current(); }
@@ -150,8 +318,9 @@ export class VoiceBridge {
     catch (error) { this.loadError = safeError(error); this.note(this.loadError, true); this.diagnostics.record(error); }
     this.diagnostics.start();
     try { await this.timerIntegration.start(); } catch (error) { this.recordError(error, "timer_integration"); }
+    this.startText();
   }
-  private note(text: string, error = false, source?: "voice_receive" | "music" | "settings"): void {
+  private note(text: string, error = false, source?: "voice_receive" | "voice_connection" | "music" | "settings" | "text_network"): void {
     this.updates.unshift({ at: Date.now(), text: safeError(new Error(text), this.settings), error });
     this.updates = this.updates.slice(0, 12);
     if (error) { this.lastError = this.updates[0].text; this.lastErrorSource = source; if (/^\[MUSIC_[A-Z_]+\]/.test(text)) this.diagnostics.record(new Error(text)); else this.diagnostics.start(false); }
@@ -159,6 +328,7 @@ export class VoiceBridge {
   state(): Record<string, unknown> {
     if (this.pending && (this.pending.expiresAt <= Date.now() || !this.transport.present(this.pending.speaker))) this.pending = undefined;
     return {
+      text: this.textDiscord.state(),
       connected: this.transport.connected, phase: this.phase, status: this.status,
       botName: this.transport.botName, channelName: this.transport.channelName,
       participants: this.transport.participants(), queueSize: this.queue.length,
@@ -221,6 +391,7 @@ export class VoiceBridge {
       const previous = this.settings;
       const changed = (keys: (keyof Settings)[]) => keys.some(key => JSON.stringify(previous[key]) !== JSON.stringify(candidate[key]));
       const connectionChanged = changed(["botToken", "guildId", "channelId"]);
+      const textChanged = changed(["botToken", "guildId", "textChannelId", "textEnabled", "textChatEnabled", "textMusicEnabled", "textSummonEnabled", "textChatMode", "textContextSeconds", "textMusicService"]);
       const accessChanged = changed(["commandsEnabled", "allowedUserIds", "confirmCommands", "commandPhrase", "moderationEnabled", "moderatorUserIds", "confirmModeration", "moderationUserAliases", "moderationChannelAliases", "googleSpeechConfirmed"]);
       const voiceChanged = changed(["ttsEngine", "ttsPython", "supertonicModelPath", "supertonicVoice", "supertonicCustomVoicePath", "supertonicSpeed", "windowsVoice", "windowsRate", "ttsBaseUrl", "ttsModel", "ttsVoice", "ttsApiKey", "fishApiKey", "fishModel", "fishVoice", "sttEngine", "sttBaseUrl", "sttModel", "sttApiKey", "sttPython", "whisperPython", "whisperModelPath", "voskModelPath", "sttUseAstra", "googleApiKey"]);
       const modelChanged = changed(["llmBaseUrl", "llmModel", "llmProviderId", "llmUseAstra", "llmUseAstraPersonality", "llmApiKey", "screenVisionConfirmed", "screenCloudConfirmed", "screenCloudOrigin", "screenDisplay"]);
@@ -234,6 +405,9 @@ export class VoiceBridge {
         if (voiceChanged || modelChanged || changed(["radioEnabled", "radioEvery", "radioWhen", "radioNext", "radioSkipEmpty"])) this.music.cancelRadio();
         if (voiceChanged) this.providers.stop();
         if (modelChanged) { this.history = []; this.browserScreen.stop(); this.screenSharing = false; this.screenEpoch++; this.lastScreenAt = 0; }
+        if (modelChanged) this.textRoom.reset();
+        if (textChanged) this.startText();
+        if (this.summonedChannelId && !this.settings.textSummonEnabled) this.disconnectCore();
         this.loadError = "";
         if (this.lastErrorSource === "settings") { this.lastError = ""; this.lastErrorSource = undefined; }
         if (connectionChanged || accessChanged || voiceChanged || modelChanged) { this.lastError = ""; this.lastErrorSource = undefined; this.note("Настройки сохранены."); this.diagnostics.start(); }
@@ -246,6 +420,7 @@ export class VoiceBridge {
     if (this.configSaving) throw new Error("Дождитесь сохранения настроек.");
     if (this.connectPending) throw new Error("Подключение уже выполняется.");
     if (!valid && this.radioShift.active) throw new Error("Сначала завершите текущую смену радиоведущей.");
+    if (!valid) { this.stopPublicVoiceExit(); this.summonedChannelId = ""; }
     const current = valid || (() => true);
     this.connectPending = true;
     this.phase = "connecting"; this.lastError = ""; this.lastErrorSource = undefined;
@@ -268,7 +443,7 @@ export class VoiceBridge {
     return this.disconnectCore();
   }
   private disconnectCore(): { ok: true } {
-    this.transport.disconnect(); this.providers.stop(); this.phase = "offline"; this.status = "Бот отключён"; return { ok: true };
+    this.stopPublicVoiceExit(); this.transport.disconnect(); this.summonedChannelId = ""; this.providers.stop(); this.phase = "offline"; this.status = "Бот отключён"; return { ok: true };
   }
   stopSpeech(): { ok: true } { this.music.cancelRadio(); this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.note("Озвучка и ожидающие реплики остановлены."); return { ok: true }; }
   clearHistory(): { ok: true } { this.music.cancelRadio(); this.moderation.clear(); this.controller?.abort(); this.transport.stopPlayback(); this.queue = []; this.history = []; this.lastHeard = ""; this.lastAnswer = ""; this.note("История общего разговора очищена."); return { ok: true }; }
@@ -302,7 +477,7 @@ export class VoiceBridge {
             continue;
           }
           if (isDisconnectUtterance(this.settings, text)) {
-            const allowed = () => !this.configSaving && this.transport.present(job.speaker) && this.settings.allowedUserIds.includes(job.speaker.userId);
+            const allowed = () => !this.configSaving && this.transport.present(job.speaker) && (this.settings.allowedUserIds.includes(job.speaker.userId) || this.canPublicVoiceLeave(job.speaker.userId));
             if (!allowed()) {
               this.lastAnswer = "У этого аккаунта нет доступа к отключению бота.";
               this.note("Голосовой запрос отключения бота отклонён.");
@@ -319,7 +494,7 @@ export class VoiceBridge {
             }
             continue;
           }
-          const route = routeUtterance(this.settings, job.speaker, text);
+          const route = routeUtterance(this.effectiveSettings(), job.speaker, text);
           let reply = "";
           if (route.kind === "ignore") continue;
           if (route.kind === "deny") { reply = route.text || "Доступ запрещён."; this.note("Запрос управления ПК отклонён."); }
@@ -536,13 +711,13 @@ export class VoiceBridge {
     return { ok: true, settings: publicSettings(this.settings), model: selected.llmModel, keyNotice };
   }
   async useAstraVoice(): Promise<unknown> {
-    const root = join(process.env.APPDATA || "", "astra", "astra");
+    const root = astraConfig();
     let voice: any;
-    try { voice = JSON.parse(await readFile(join(root, "config", "settings.json"), "utf8")).voice; }
+    try { voice = JSON.parse(await readFile(join(root, "settings.json"), "utf8")).voice; }
     catch { throw new Error("Не удалось прочитать настройки голоса Astra."); }
     if (voice?.tts_provider === "vox") throw new Error("Vox пока недоступен для Discord: API Astra не возвращает его аудио, а лицензия не разрешает включать движок в сторонний плагин. Выберите Supertonic, Windows или Fish Audio.");
     if (voice?.tts_provider !== "supertonic") throw new Error("Сейчас в Astra выбран другой движок. Автоматическое подключение поддерживает Supertonic 3.");
-    const model = join(root, "data", "models", "supertonic-3");
+    const model = join(astraData(), "models", "supertonic-3");
     const selected = voice.voices?.supertonic;
     const id = typeof selected === "string" && /^(?:[MF][1-5]|custom_[a-zA-Z0-9_-]{1,100})$/.test(selected) ? selected : "F4";
     const name = id.startsWith("custom_") ? "custom" : id;
@@ -580,5 +755,5 @@ export class VoiceBridge {
     try { await this.say("Привет! Я Астра. Голосовое соединение с Discord работает.", controller.signal); return { ok: true }; }
     finally { if (this.controller === controller) this.controller = undefined; this.phase = this.transport.connected ? "listening" : "offline"; }
   }
-  async shutdown(): Promise<void> { this.closing = true; this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.supertonicSetup.stop(); this.musicSetup.stop(); this.disconnect(); await this.timerIntegration.close(); }
+  async shutdown(): Promise<void> { this.closing = true; this.textDiscord.stop(); this.diagnostics.stop(); this.recognitionImport?.stop(); this.setup.stop(); this.whisperSetup.stop(); this.supertonicSetup.stop(); this.musicSetup.stop(); this.disconnect(); await this.timerIntegration.close(); }
 }

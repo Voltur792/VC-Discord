@@ -37,6 +37,10 @@ export function windowsFailure(stderr: string): string {
 }
 
 export async function runWindows(input: Record<string, unknown>, signal?: AbortSignal): Promise<Buffer> {
+  if (process.platform !== "win32") {
+    const { runPosix } = await import("./posix-service");
+    return runPosix(input, signal);
+  }
   const action = ["protect", "unprotect", "voices", "speak", "diagnostics"].includes(String(input.action)) ? String(input.action) : "unknown";
   const script = join(__dirname, "assets", "windows.ps1");
   try { await access(script); } catch { throw new WindowsServiceError("WIN_SCRIPT_MISSING", action); }

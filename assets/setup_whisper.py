@@ -15,7 +15,7 @@ def main():
         folder = Path(sys.argv[1]) / "whisper-env"
         send({"status": "Создаём отдельное окружение Whisper…"})
         venv.EnvBuilder(with_pip=True).create(folder)
-        python = folder / "Scripts" / "python.exe"
+        python = folder / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         send({"status": "Устанавливаем движок Whisper. Модель Astra повторно не скачивается…"})
         subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check",
                         "--only-binary=:all:", "pywhispercpp==1.5.1"],

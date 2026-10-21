@@ -1,7 +1,8 @@
-import { Client, Events, GatewayIntentBits, ChannelType, PermissionFlagsBits, ActivityType } from "discord.js";
+import { Client, Events, GatewayIntentBits, ChannelType, PermissionFlagsBits, ActivityType, type VoiceState } from "discord.js";
 import { AudioPlayerStatus, VoiceConnectionStatus, NoSubscriberBehavior, EndBehaviorType, StreamType, createAudioPlayer, createAudioResource, entersState, joinVoiceChannel, type VoiceConnection, type AudioReceiveStream } from "@discordjs/voice";
 import type { Readable } from "node:stream";
-import type { Settings } from "./config";
+import { safeError, type Settings } from "./config";
+import { networkErrorCode } from "./network-error";
 import type { Speaker } from "./access";
 import { OpusScript, opusStream, rms } from "./audio";
 import { VoiceMixer } from "./mixer";
@@ -28,10 +29,11 @@ export class VoiceTransport {
   private pendingActivity?: { name: string; type: ActivityType.Listening | ActivityType.Watching };
   botName = "";
   channelName = "";
-  constructor(private getSettings: () => Settings, private onAudio: (speaker: Speaker, pcm: Buffer) => void, private onState: (message: string, error?: boolean, source?: "voice_receive") => void, private onInterruption: () => void, private onInvalidate: () => void) {
+  constructor(private getSettings: () => Settings, private onAudio: (speaker: Speaker, pcm: Buffer) => void, private onState: (message: string, error?: boolean, source?: "voice_receive" | "voice_connection") => void, private onInterruption: () => void, private onInvalidate: () => void, private trace: (code: string, error?: boolean) => void = () => {}) {
     this.player.on("error", () => this.onState("Ошибка воспроизведения ответа.", true));
   }
   get connected(): boolean { return this.connection?.state.status === VoiceConnectionStatus.Ready && !!this.client?.isReady(); }
+  get recovering(): boolean { return !!this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed && !this.connected; }
   participants(): { id: string; name: string; number: number; allowed: boolean; moderator: boolean }[] {
     const channel = this.client?.channels.cache.get(this.channelId);
     if (!channel || channel.type !== ChannelType.GuildVoice) return [];
@@ -115,17 +117,10 @@ export class VoiceTransport {
     this.onState("Подключаем бота к Discord…");
     const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
     this.client = client;
-    client.on(Events.Error, () => this.onState("Discord сообщил об ошибке соединения.", true));
-    client.on(Events.ShardDisconnect, () => { if (this.client === client) { this.invalidate(); this.onState("Связь с Discord потеряна; ожидаем восстановления.", true); } });
-    client.on(Events.VoiceStateUpdate, (before, after) => {
-      if (this.client !== client) return;
-      if (after.id === client.user?.id && this.connection && after.channelId !== this.channelId) {
-        this.disconnect(); this.onState("Бот отключён или перемещён из выбранного канала. Подключите его снова.", true);
-      } else if (before.channelId === this.channelId && after.channelId !== this.channelId) {
-        this.membershipVersions.set(after.id, (this.membershipVersions.get(after.id) ?? 0) + 1);
-        this.captures.get(after.id)?.cancel();
-      }
-    });
+    client.on(Events.Error, error => { if (this.client === client) this.connectionError(error, "gateway"); });
+    client.on(Events.ShardDisconnect, event => { if (this.client === client) { this.trace(`VOICE_GATEWAY_DISCONNECTED code=${Number(event.code) || 0}`); this.invalidate(); this.onState("Связь с Discord потеряна; ожидаем восстановления.", true); } });
+    client.on(Events.ShardResume, () => { if (this.client === client && this.connected) this.onState("Связь с Discord восстановлена.", false, "voice_connection"); });
+    client.on(Events.VoiceStateUpdate, (before, after) => this.voiceStateChanged(client, before, after));
     try {
       await Promise.race([client.login(s.botToken), new Promise<never>((_, reject) => { const t = setTimeout(() => reject(new Error("Discord не ответил за 30 секунд.")), 30_000); t.unref(); })]);
       if (generation !== this.generation || this.client !== client) throw new Error("Подключение отменено.");
@@ -140,21 +135,26 @@ export class VoiceTransport {
       this.channelName = channel.name; this.botName = client.user?.username || "Бот";
       const connection = joinVoiceChannel({ channelId: channel.id, guildId: guild.id, adapterCreator: guild.voiceAdapterCreator, selfDeaf: false, selfMute: false, group: "discord-voice-bridge" });
       this.connection = connection;
+      connection.on("stateChange", (before, after) => {
+        if (this.connection !== connection) return;
+        this.trace(`VOICE_CONNECTION_STATE from=${before.status} to=${after.status}${after.status === VoiceConnectionStatus.Disconnected ? ` reason=${Number(after.reason)} close_code=${"closeCode" in after ? Number(after.closeCode) : 0}` : ""}`);
+        if (!this.connecting && after.status === VoiceConnectionStatus.Ready && this.connected) this.onState("Голосовая связь Discord восстановлена.", false, "voice_connection");
+      });
       connection.subscribe(this.player);
-      connection.on("error", () => this.onState("Ошибка голосового соединения Discord.", true));
+      connection.on("error", error => { if (this.connection === connection) this.connectionError(error); });
       connection.receiver.speaking.on("start", userId => this.capture(userId));
       connection.on(VoiceConnectionStatus.Disconnected, () => {
         if (this.connection !== connection) return;
         this.invalidate(); this.onState("Голосовая связь потеряна; восстанавливаем соединение…", true);
         Promise.race([entersState(connection, VoiceConnectionStatus.Signalling, 5000), entersState(connection, VoiceConnectionStatus.Connecting, 5000)])
           .then(() => entersState(connection, VoiceConnectionStatus.Ready, 20_000))
-          .then(() => { if (this.connection === connection) this.onState("Бот снова слушает канал."); })
-          .catch(() => { if (this.connection === connection) { this.disconnect(); this.onState("Не удалось восстановить голосовое соединение. Нажмите «Войти в канал».", true); } });
+          .then(() => { if (this.connection === connection) this.onState("Бот снова слушает канал.", false, "voice_connection"); })
+          .catch(() => { if (this.connection === connection) { this.trace("VOICE_RECOVERY_TIMEOUT"); this.disconnect(); this.onState("Не удалось восстановить голосовое соединение. Нажмите «Войти в канал».", true); } });
       });
       await entersState(connection, VoiceConnectionStatus.Ready, 25_000);
       if (this.connection !== connection) throw new Error("Подключение отменено.");
       this.musicPresence();
-      this.onState("Бот слушает канал.");
+      this.onState("Бот слушает канал.", false, "voice_connection");
     } catch (error) {
       if (this.client === client) this.disconnect();
       throw error;
@@ -164,6 +164,38 @@ export class VoiceTransport {
     this.receiveFailed = true;
     this.onState(message, true, "voice_receive");
   }
+  private connectionError(error: unknown, origin: "voice" | "gateway" = "voice"): void {
+    const raw = error instanceof Error ? error.message : "";
+    const kind = networkErrorCode(error) || (/dave|mls|decrypt|key.?package/iu.test(raw) ? "VOICE_ENCRYPTION_ERROR" : /tls|certificate|cert_/iu.test(raw) ? "VOICE_TLS_ERROR" : /udp/iu.test(raw) ? "VOICE_UDP_ERROR" : "VOICE_NETWORK_ERROR");
+    const explanations: Record<string, string> = {
+      NETWORK_CONNECTION_CLOSED: "Голосовой сервер Discord прервал соединение.",
+      NETWORK_TIMEOUT: "Голосовой сервер Discord не ответил вовремя.",
+      NETWORK_UNAVAILABLE: "Не удалось связаться с голосовым сервером Discord. Проверьте сеть и VPN.",
+      VOICE_ENCRYPTION_ERROR: "Ошибка защищённого голосового соединения Discord (DAVE).",
+      VOICE_TLS_ERROR: "Не удалось установить защищённое соединение с сервером Discord.",
+      VOICE_UDP_ERROR: "Ошибка передачи звука Discord по сети (UDP).",
+      VOICE_NETWORK_ERROR: "Ошибка голосовой сети Discord. Причина записана в журнал плагина.",
+    };
+    // Keep the original diagnostic, but never gateway credentials, signed URLs,
+    // numeric key arrays, addresses or long session/key identifiers.
+    const detail = safeError(error, this.getSettings()).replace(/https?:\/\/[^\s]+/giu, "[адрес скрыт]")
+      .replace(/((?:token|session_?id|secret_?key|authorization)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\[[^\]]*\]|[^\s,;]+)/giu, "$1[скрыто]")
+      .replace(/\[(?:\s*\d+\s*,){3,}[^\]]*\]/gu, "[ключ скрыт]")
+      .replace(/\b[A-Za-z0-9_-]{32,}\b/gu, "[скрыто]").replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/gu, "[сетевой адрес]")
+      .replace(/[\r\n\0]/gu, " ").slice(0, 320);
+    this.trace(`VOICE_NETWORK_ERROR origin=${origin} kind=${kind} detail=${detail}`, true);
+    this.onState(`${explanations[kind]} Код: ${kind}.`, true, "voice_connection");
+  }
+  private voiceStateChanged(client: Client, before: VoiceState, after: VoiceState): void {
+    if (this.client !== client || after.guild.id !== this.guildId) return;
+    if (after.id === client.user?.id && this.connection && after.channelId !== this.channelId) {
+      this.trace(after.channelId ? "VOICE_BOT_MOVED" : "VOICE_BOT_REMOVED");
+      this.disconnect(); this.onState("Бот отключён или перемещён из выбранного канала. Подключите его снова.", true);
+    } else if (before.channelId === this.channelId && after.channelId !== this.channelId) {
+      this.membershipVersions.set(after.id, (this.membershipVersions.get(after.id) ?? 0) + 1);
+      this.captures.get(after.id)?.cancel();
+    }
+  }
   private capture(userId: string): void {
     const connection = this.connection, settings = this.getSettings();
     if (!connection || !this.connected || this.captures.has(userId) || this.captures.size >= 8 || !this.participants().some(m => m.id === userId)) return;
@@ -171,7 +203,7 @@ export class VoiceTransport {
     const speaker: Speaker = { userId, guildId: this.guildId, channelId: this.channelId, generation: this.generation, membershipVersion: this.membershipVersions.get(userId) ?? 0 };
     let decoder: OpusScript;
     try { decoder = new OpusScript(48000, 2, OpusScript.Application.VOIP); }
-    catch { this.receiveError("Не удалось создать декодер звука Discord. Перезапустите VC-Discord."); return; }
+    catch (error) { this.receiveError(`Не удалось создать декодер звука Discord (${codecFailure(error, "OPUS_INIT_FAILED")}). Перезапустите VC-Discord.`); return; }
     const dispose = () => { try { decoder.delete(); } catch {} };
     let stream: AudioReceiveStream;
     try { stream = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: settings.silenceMs } }); }
@@ -200,8 +232,8 @@ export class VoiceTransport {
       } catch (error) {
         badPackets++; consecutiveBad++;
         const message = error instanceof Error ? error.message : "";
-        if (/abort|memory access|out of bounds|unreachable/i.test(message)) {
-          cancel(); this.receiveError("Декодер звука Discord остановлен после внутренней ошибки. Перезапустите VC-Discord."); return;
+        if (/abort|memory access|out of bounds|unreachable|detached|out of memory/i.test(message)) {
+          cancel(); this.receiveError(`Декодер звука Discord остановлен после внутренней ошибки (${codecFailure(error, "OPUS_INTERNAL_FAILED")}). Перезапустите VC-Discord.`); return;
         }
         // A single damaged frame must not cancel an otherwise valid utterance.
         if (consecutiveBad >= 4) {
@@ -273,6 +305,7 @@ export class VoiceTransport {
     this.player.stop(true); this.audio?.destroy(); this.audio = undefined;
   }
   disconnect(): void {
+    if (this.connection) this.trace("VOICE_TRANSPORT_CLOSED");
     this.invalidate();
     this.mixer?.destroy(); this.mixer = undefined; this.player.stop(true); this.audio?.destroy(); this.audio = undefined;
     const connection = this.connection; this.connection = undefined;
@@ -285,4 +318,11 @@ export class VoiceTransport {
     this.personNumbers.clear(); this.roomNumbers.clear();
     this.guildId = ""; this.channelId = ""; this.channelName = ""; this.botName = "";
   }
+}
+
+function codecFailure(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (/detached/i.test(message)) return "OPUS_HEAP_CHANGED";
+  if (/memory|alloc|abort|out of bounds|unreachable/i.test(message)) return "OPUS_MEMORY_FAILED";
+  return fallback;
 }

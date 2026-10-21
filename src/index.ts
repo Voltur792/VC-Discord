@@ -45,6 +45,8 @@ export const app = plugin({
       disconnect: call(() => bridge.disconnect()),
       stop: call(() => bridge.stopSpeech()),
       clear_history: call(() => bridge.clearHistory()),
+      clear_text_history: call(() => bridge.clearTextHistory()),
+      restart_text: call(() => bridge.restartText()),
       approve: call(value => bridge.approve(value)),
       reject: call(value => bridge.reject(value)),
       models: call(value => bridge.models(value), "models"),
@@ -71,13 +73,19 @@ export const app = plugin({
 // honest "am I the entrypoint" test. Importing this module — as the test does —
 // does not start a server.
 export { CommandGate, authorized, routeUtterance } from "./access";
-export { defaults, normalizeSettings, publicSettings, validateSettings, SettingsStore } from "./config";
+export { defaults, normalizeSettings, publicSettings, validateSettings, textSetupIssue, SettingsStore, safeError } from "./config";
 export { wav, fromWav, resample, rms, opusStream, OpusScript } from "./audio";
-export { publicChat, Providers } from "./providers";
+export { publicChat, Providers, limitedBody } from "./providers";
+export { networkErrorCode } from "./network-error";
 export { DiscordMusic } from "./music";
 export { RadioShiftSession, validateRadioShift } from "./radio-shift";
 export { TimerIntegration } from "./timer-integration";
 export { RadioPresenter, radioPrompt } from "./radio";
 export { VoiceBridge } from "./bridge";
 export { VoiceTransport } from "./voice";
+export { TextRoom, parseTextCommand, vkPlaylistId, yandexPlaylistId, spotifyPlaylistId, publicTextError } from "./text-room";
+export { TextDiscord } from "./text-discord";
+export { PublicVoiceExit } from "./public-voice";
+export { userData, astraConfig, astraData, integrationDir, openCommand } from "./platform";
+export { runPosix } from "./posix-service";
 if (require.main === module) app.run();

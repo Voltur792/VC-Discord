@@ -1,3 +1,4 @@
+import { pathEntries, astraData } from "./platform";
 import { execFile } from "node:child_process";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -21,13 +22,20 @@ async function discover(preferred: string): Promise<string> {
   const root = resolve(__dirname, ".."), home = homedir();
   const candidates = [preferred, process.env.SUPERTONIC_PYTHON || "", ...[process.env.VIRTUAL_ENV, process.env.CONDA_PREFIX].filter(Boolean).map(p => join(p!, "Scripts", "python.exe")), join(dataDir, "supertonic-env", "Scripts", "python.exe"), join(root, ".runtime", "supertonic", "Scripts", "python.exe"), join(root, ".venv", "Scripts", "python.exe"), pythonPath()];
   for (const env of [process.env.VIRTUAL_ENV, process.env.CONDA_PREFIX]) if (env) candidates.push(join(env, "python.exe"));
-  for (const p of (process.env.PATH || "").split(";").map(p => p.replace(/^"|"$/g, ""))) if (isAbsolute(p) && !/WindowsApps/i.test(p)) candidates.push(join(p, "python.exe"));
+  for (const p of pathEntries()) if (isAbsolute(p) && !/WindowsApps/i.test(p)) candidates.push(join(p, "python.exe"));
   // Bounded discovery of common environment locations, including neighbouring
   // plugins. Never crawl the whole drive or change the user's PATH.
   for (const folder of [dirname(root), dirname(dataDir), join(process.env.APPDATA || home, "astra", "astra"), join(home, ".virtualenvs"), join(home, "miniconda3", "envs"), join(home, "anaconda3", "envs"), join(process.env.LOCALAPPDATA || home, "Programs", "Python")]) {
     let dirs: string[] = [];
     try { dirs = (await readdir(folder, { withFileTypes: true })).filter(p => p.isDirectory() && !p.isSymbolicLink()).slice(0, 100).map(p => join(folder, p.name)); } catch {}
     for (const dir of dirs) for (const suffix of ["python.exe", "Scripts/python.exe", ".venv/Scripts/python.exe", "venv/Scripts/python.exe", ".runtime/supertonic/Scripts/python.exe", "supertonic-env/Scripts/python.exe"]) candidates.push(join(dir, suffix));
+  }
+  if (process.platform !== "win32") {
+    for (const env of [process.env.VIRTUAL_ENV, process.env.CONDA_PREFIX, join(dataDir, "supertonic-env"), join(root, ".venv"), join(root, ".runtime", "supertonic")]) if (env) candidates.unshift(join(env, "bin", "python3"), join(env, "bin", "python"));
+    candidates.push(pythonPath());
+    for (const folder of [dirname(root), dirname(dataDir), astraData()]) {
+      try { for (const item of (await readdir(folder, { withFileTypes: true })).filter(p => p.isDirectory() && !p.isSymbolicLink()).slice(0, 100)) for (const suffix of [".venv/bin/python", "supertonic-env/bin/python", "bin/python3"]) candidates.push(join(folder, item.name, suffix)); } catch {}
+    }
   }
   const unique: string[] = [], seen = new Set<string>();
   for (const path of candidates) if (path && !seen.has(path.toLowerCase()) && await exists(path)) { seen.add(path.toLowerCase()); unique.push(path); }

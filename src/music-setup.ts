@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { dataDir } from "./config";
 import { powershellPath } from "./runtime";
 import { windowsFailure, WindowsServiceError } from "./process";
+import { pathEntries } from "./platform";
 
 // A fixed Gyan essentials build linked from ffmpeg.org/download.html.
 // Never execute a downloaded file before checking the published archive digest.
@@ -18,6 +19,7 @@ export async function findMusicFFmpeg(preferred = ""): Promise<string> {
   // Once preparation repairs a stale custom path, playback uses the verified copy.
   const candidates = [join(runtimeDir, "ffmpeg.exe"), preferred, join(__dirname, "native", "ffmpeg.exe"),
     "C:\\ffmpeg\\bin\\ffmpeg.exe", ...(process.env.PATH || "").split(";").filter(Boolean).map(p => join(p.replace(/^"|"$/g, ""), "ffmpeg.exe"))];
+  if (process.platform !== "win32") candidates.splice(0, candidates.length, preferred, ...pathEntries().map(p => join(p, "ffmpeg")), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg");
   for (const path of candidates.filter(Boolean)) {
     try { if ((await stat(path)).isFile()) { await access(path); return path; } } catch {}
   }
@@ -64,7 +66,7 @@ export class MusicSetup {
           signal.throwIfAborted(); this.ready = true; this.status = "Музыка готова. FFmpeg уже найден на этом ПК."; return;
         } catch { signal.throwIfAborted(); }
       }
-      if (process.platform !== "win32" || process.arch !== "x64") throw new MusicPreparationError("Автоматическая подготовка музыки поддерживает Windows x64.");
+      if (process.platform !== "win32" || process.arch !== "x64") throw new MusicPreparationError("Установите FFmpeg системным пакетным менеджером (Linux: ffmpeg; macOS: brew install ffmpeg), затем повторите подготовку или укажите полный путь к ffmpeg.");
       temporary = join(dataDir, "music", "downloads", randomUUID());
       await mkdir(temporary, { recursive: true });
       const archive = join(temporary, "ffmpeg.zip");

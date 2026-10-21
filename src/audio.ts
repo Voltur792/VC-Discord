@@ -44,8 +44,11 @@ export function rms(pcm: Buffer): number {
   return count ? Math.sqrt(energy / count) : 0;
 }
 export function opusStream(pcm: Buffer): Readable {
-  const codec = new OpusScript(48000, 2, OpusScript.Application.AUDIO);
   function* frames() {
+    // A generator cancelled before its first next() never enters finally.
+    // Allocate only when consumption actually starts, so early barge-in cannot
+    // leak a native codec and its buffers on every interrupted reply.
+    const codec = new OpusScript(48000, 2, OpusScript.Application.AUDIO);
     try {
       for (let i = 0; i < pcm.length; i += 3840) {
         const frame = Buffer.alloc(3840); pcm.copy(frame, 0, i, Math.min(i + 3840, pcm.length));

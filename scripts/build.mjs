@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { voiceCompatibility } from "./voice-compat.mjs";
 import { patchOpusScriptSource } from "./opus-compat.mjs";
+import { prepareNative } from "./native-assets.mjs";
 const require = createRequire(import.meta.url);
 // Astra serves contribution URLs relative to ui/, rather than the project root.
 await readFile("ui/web/index.html");
@@ -23,16 +24,7 @@ const opusSource = require.resolve("opusscript");
 const opusPackage = JSON.parse(await readFile(join(dirname(opusSource), "package.json"), "utf8"));
 if (opusPackage.version !== "0.1.1") throw new Error("Review the PCM memory repair before changing the pinned OpusScript version.");
 await writeFile("dist/native/opusscript/index.js", patchOpusScriptSource(await readFile(opusSource, "utf8")));
-// GitHub's noarch job runs on Linux, where npm omits Windows-only packages.
-// Keep the pinned Windows runtime available for that cross-platform packaging.
-let daveySource;
-try { daveySource = require.resolve("@snazzah/davey-win32-x64-msvc"); }
-catch { daveySource = "third_party/davey-win32-x64-msvc.node"; }
-let daveyUnchanged = false;
-try { daveyUnchanged = (await readFile(daveySource)).equals(await readFile("dist/native/davey.node")); }
-catch (error) { if (error.code !== "ENOENT") throw error; }
-// Windows locks a loaded native module. Preserve it when its bytes are unchanged.
-if (!daveyUnchanged) await cp(daveySource, "dist/native/davey.node");
+await prepareNative();
 const native = {
   name: "local-native-assets",
   setup(builder) {
@@ -47,7 +39,7 @@ const native = {
     }));
     builder.onResolve({ filter: /^(opusscript|@snazzah\/davey)$/ }, args => ({ path: args.path, namespace: "voice-assets" }));
     builder.onLoad({ filter: /.*/, namespace: "voice-assets" }, args => ({
-      contents: `module.exports = require(require('node:path').join(__dirname, 'native', ${JSON.stringify(args.path === "opusscript" ? "opusscript/index.js" : "davey.node")}));`, loader: "js",
+      contents: `module.exports = require(require('node:path').join(__dirname, 'native', ${JSON.stringify(args.path === "opusscript" ? "opusscript/index.js" : "davey.cjs")}));`, loader: "js",
     }));
   },
 };
@@ -61,7 +53,7 @@ if (process.argv.includes("--test")) {
   await cp("dist/assets", "test/artifact/assets", { recursive: true });
   await build({ ...options, external: ["astra-plugin-sdk"], outfile: "test/artifact/plugin.cjs" });
 }
-await writeFile("dist/BUILD.txt", "Windows x64; Node.js >= 22.12; all JavaScript dependencies bundled.\n");
+await writeFile("dist/BUILD.txt", "Windows/Linux x64; macOS and ARM runtime adapters prepared; Node.js >= 22.12; all JavaScript and DAVE platform modules bundled.\n");
 const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
 for (const [folder, info] of Object.entries(lock.packages)) {
   if (!folder.startsWith("node_modules/")) continue;

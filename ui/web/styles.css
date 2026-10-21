@@ -39,7 +39,7 @@ button.quiet { border-color: transparent; padding: 4px 8px; font-size: 12px; }
 .panel > p.muted { margin: 8px 0 20px; font-size: 13px; }
 label:not(.check) { display: block; font-size: 12px; font-weight: 600; margin: 16px 0 8px; }
 input:not([type="checkbox"]), select, textarea { width: 100%; padding: 10px 12px; user-select: text; min-width: 0; }
-input::placeholder, textarea::placeholder { color: var(--color-text-muted, #92929e); opacity: .7; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4 3 3 3-3' fill='none' stroke='%2392929e' stroke-width='1.5'/%3E%3C/svg%3E"); background-position: right 12px center; background-repeat: no-repeat; padding-right: 32px; }
 option { color: var(--color-text, #e8e8ec); background: var(--color-surface, #22222b); }
 textarea { resize: vertical; min-height: 96px; }
@@ -118,7 +118,8 @@ input:not([type="checkbox"]), select, textarea { min-height: 39px; padding: 8px 
 .muted, .help, .bottom-note { color: var(--muted); }
 .help { font-size: 12px; }
 .choice-menu { background: var(--color-surface, #25264f); border-color: var(--line); border-radius: 10px; }
-.choice-menu button[aria-selected="true"] { color: var(--text); background: var(--action); }
+.choice-menu button[aria-selected="true"] { color: #fff; background: var(--action); }
+.panel > h2:not(:first-child) { margin-top: 28px; }
 .check input:checked { border-color: var(--focus); background: var(--action); }
 .provider-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .provider-row .choice { flex: 1 1 240px; min-width: 0; }

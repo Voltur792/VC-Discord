@@ -9,6 +9,7 @@ import { findMusicFFmpeg } from "./music-setup";
 import { runWindows, WindowsServiceError, windowsFailure } from "./process";
 import { powershellPath, pythonPath } from "./runtime";
 import { findVoicePython } from "./voice-runtime";
+import { networkErrorCode, networkErrorMessage } from "./network-error";
 
 type Result = "ok" | "warning" | "error";
 interface Check { id: string; title: string; result: Result; code: string; detail: string; fix?: "setup_local" | "setup_whisper" | "setup_music" | "setup_voice" }
@@ -40,12 +41,13 @@ export class Diagnostics {
   state(): Record<string, unknown> { return { running: this.running, checkedAt: this.checkedAt, checks: this.checks, lastFailure: this.lastFailure || null }; }
   report(): Record<string, unknown> {
     // A deliberately separate schema: no Settings, chat history or raw logs.
-    return { format: "vc-discord-diagnostics-v1", pluginVersion, node: process.versions.node, platform: process.platform, arch: process.arch, windowsVersion: release(), ...this.state() };
+    return { format: "vc-discord-diagnostics-v1", pluginVersion, node: process.versions.node, platform: process.platform, arch: process.arch, systemVersion: release(), windowsVersion: process.platform === "win32" ? release() : undefined, ...this.state() };
   }
   record(error: unknown): void {
     if (error instanceof WindowsServiceError) this.lastFailure = { code: error.code, action: error.action, exitCode: error.exitCode ?? null, at: Date.now(), detail: error.message };
     else {
       const message = error instanceof Error ? error.message : "";
+      const network = networkErrorCode(error);
       const music = message.match(/^\[(MUSIC_STREAM_FAILED|MUSIC_EARLY_EOF|MUSIC_STREAM_INTERRUPTED|MUSIC_NEXT_FAILED)\]/);
       const http = message.match(/\bHTTP (401|403|404|429|5\d\d)\b/);
       const known: Record<string, string> = {
@@ -56,6 +58,7 @@ export class Diagnostics {
       };
       if (music) this.lastFailure = { code: music[1], action: "music", exitCode: null, at: Date.now(), detail: "Музыкальный поток завершился с ошибкой или до конца песни. Очередь остановлена. Проверьте подключение сервиса в Astra Music и повторно включите трек." };
       else if (http) this.lastFailure = { code: "API_HTTP_" + http[1], action: "api", exitCode: null, at: Date.now(), detail: known[http[1]] || "Сервер модели временно недоступен. Повторите позже." };
+      else if (network) this.lastFailure = { code: network, action: "network", exitCode: null, at: Date.now(), detail: networkErrorMessage(network) };
       else this.lastFailure = { code: "UI_ACTION_FAILED", action: "ui", exitCode: null, at: Date.now(), detail: "Действие плагина завершилось ошибкой. Проверьте сообщение на странице и результаты автодиагностики." };
     }
     this.start(false);
@@ -83,7 +86,7 @@ export class Diagnostics {
     ];
   }
   private async windows(): Promise<Check[]> {
-    if (process.platform !== "win32") return [{ id: "windows", title: "Службы Windows", result: "error", code: "WINDOWS_REQUIRED", detail: "Этот плагин рассчитан на Windows x64." }];
+    if (process.platform !== "win32") return [{ id: "windows", title: "Системные службы", result: "ok", code: "POSIX_RUNTIME", detail: "Используется системный Python и FFmpeg. Локальные ключи защищены отдельным файлом с правами 600; системная озвучка — espeak-ng в Linux и say в macOS. Доступ к экрану выбирается в браузере." }];
     const script = join(__dirname, "assets", "windows.ps1");
     if (!await present(script, "file")) return [{ id: "windows", title: "Служебные файлы", result: "error", code: "WIN_SCRIPT_MISSING", detail: "Не найден windows.ps1. Переустановите готовый .astraplugin либо соберите исходники перед загрузкой через «Разработка»." }];
     // Inline read-only commands work even when .ps1 files are prohibited. The
@@ -154,8 +157,8 @@ export class Diagnostics {
     try {
       const voices: any = JSON.parse((await runWindows({ action: "voices" }, AbortSignal.timeout(10000))).toString("utf8"));
       const enabled = Array.isArray(voices) && voices.some(v => typeof v.name === "string" && (!s.windowsVoice || v.name === s.windowsVoice));
-      return [{ id: "voice", title: "Голоса Windows", result: enabled ? "ok" : "error", code: enabled ? "WINDOWS_VOICE_FOUND" : "WIN_VOICE", detail: enabled ? "Доступный голос найден. Озвучка при диагностике не запускается." : "Нет выбранного голоса. Установите голос в параметрах речи Windows или выберите найденный голос через «Найти установленные голоса»." }];
-    } catch (error) { return [{ id: "voice", title: "Голоса Windows", result: "error", code: error instanceof WindowsServiceError ? error.code : "WIN_SPEECH_INIT", detail: error instanceof WindowsServiceError ? error.message : "Проверка голосов не завершилась. Повторите диагностику или выберите голос Astra/API." }]; }
+      return [{ id: "voice", title: process.platform === "win32" ? "Голоса Windows" : "Системные голоса", result: enabled ? "ok" : "error", code: enabled ? "WINDOWS_VOICE_FOUND" : "WIN_VOICE", detail: enabled ? "Доступный голос найден. Озвучка при диагностике не запускается." : "Нет выбранного голоса. Установите системный голос (Windows / espeak-ng / macOS) или выберите найденный голос через «Найти установленные голоса»." }];
+    } catch (error) { return [{ id: "voice", title: process.platform === "win32" ? "Голоса Windows" : "Системные голоса", result: "error", code: error instanceof WindowsServiceError ? error.code : "WIN_SPEECH_INIT", detail: error instanceof WindowsServiceError ? error.message : "Проверка голосов не завершилась. Повторите диагностику или выберите голос Astra/API." }]; }
   }
   private async music(s: Settings): Promise<Check> {
     const path = await findMusicFFmpeg(s.musicFFmpeg);

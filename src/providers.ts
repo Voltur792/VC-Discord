@@ -10,6 +10,7 @@ import { WhisperWorker } from "./whisper";
 import { chatSettings, astraRecognition } from "./astra-settings";
 import { googleTranscribe } from "./google-stt";
 import { pythonPath } from "./runtime";
+import { networkErrorCode, networkErrorMessage } from "./network-error";
 
 export type ChatContent = string | ({ type: "text"; text: string } | { type: "image_url"; image_url: { url: string; detail: "auto" } })[];
 export interface ChatMessage { role: "system" | "user" | "assistant"; content: ChatContent }
@@ -24,6 +25,10 @@ export async function limitedBody(response: Response, max = 2_000_000, label = "
   const chunks: Buffer[] = []; let length = 0;
   try {
     for (;;) { const { done, value } = await reader.read(); if (done) break; length += value.length; if (length > max) throw new Error("Ответ сервиса слишком большой."); chunks.push(Buffer.from(value)); }
+  } catch (error) {
+    const code = networkErrorCode(error);
+    if (code) throw new Error(`${label}: ${networkErrorMessage(code)}`, { cause: error });
+    throw error;
   } finally { await reader.cancel().catch(() => {}); }
   return Buffer.concat(chunks);
 }

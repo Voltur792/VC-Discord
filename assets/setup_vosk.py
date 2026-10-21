@@ -24,7 +24,7 @@ def main():
         status('Создаём отдельное окружение Python…')
         environment.mkdir(parents=True, exist_ok=True)
         venv.EnvBuilder(with_pip=True).create(environment)
-        python = environment / 'Scripts' / 'python.exe'
+        python = environment / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
         status('Устанавливаем Vosk в окружение плагина…')
         subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', 'vosk==0.3.45'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         target = models / MODEL_NAME

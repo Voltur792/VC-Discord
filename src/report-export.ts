@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { dataDir } from "./config";
+import { openCommand } from "./platform";
 
 export class ReportExport {
   private lastPath = "";
@@ -32,7 +33,8 @@ export class ReportExport {
     try { await stat(this.lastPath); } catch { throw new Error("Сохранённый отчёт перемещён или удалён. Скачайте его ещё раз."); }
     const folder = dirname(this.lastPath);
     return new Promise((resolve, reject) => {
-      const child = spawn(join(process.env.SystemRoot || "C:\\Windows", "explorer.exe"), [folder], { windowsHide: true, stdio: "ignore" });
+      const [command, args] = openCommand(folder);
+      const child = spawn(command, args, { windowsHide: true, stdio: "ignore" });
       child.once("error", () => reject(new Error("Не удалось открыть Проводник. Путь к сохранённому отчёту показан во вкладке.")));
       child.once("spawn", () => { child.unref(); resolve({ ok: true }); });
     });

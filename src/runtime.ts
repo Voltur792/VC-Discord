@@ -1,9 +1,10 @@
 import { statSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { pathEntries } from "./platform";
 
 function file(path: string): boolean { try { return isAbsolute(path) && statSync(path).isFile(); } catch { return false; } }
 function onPath(name: string): string[] {
-  return (process.env.PATH || "").split(";").map(p => p.replace(/^"|"$/g, "")).filter(p => isAbsolute(p) && !/WindowsApps/i.test(p)).map(p => join(p, name));
+  return pathEntries().filter(p => !/WindowsApps/i.test(p)).map(p => join(p, name));
 }
 // Resolve installed programs directly. No persistent user/system PATH changes.
 export function powershellPath(): string {
@@ -12,6 +13,10 @@ export function powershellPath(): string {
 }
 export function pythonPath(preferred = "python"): string {
   if (preferred && !/^(python(?:3)?(?:\.exe)?)$/i.test(preferred)) return preferred;
+  if (process.platform !== "win32") {
+    const env = process.env.VIRTUAL_ENV || process.env.CONDA_PREFIX;
+    return [...(env ? [join(env, "bin", "python3"), join(env, "bin", "python")] : []), ...onPath("python3"), ...onPath("python"), "/usr/bin/python3"].find(file) || "python3";
+  }
   const local = process.env.LOCALAPPDATA || "";
   const candidates = [...onPath("python.exe")];
   if (local && isAbsolute(local)) {

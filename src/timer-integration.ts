@@ -1,3 +1,4 @@
+import { integrationDir } from "./platform";
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile, rename, readFile, unlink } from "node:fs/promises";
@@ -32,7 +33,7 @@ export class TimerIntegration {
     try {
       await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0,"127.0.0.1",resolve); });
       server.unref();
-      const folder = process.env.SPT_INTEGRATION_DIR || join(process.env.APPDATA || "", "sleep-pause-timer", "integrations");
+      const folder = integrationDir();
       this.path = join(folder,"discord.json"); await mkdir(folder,{recursive:true});
       const address = server.address(); if (!address || typeof address === "string") throw new Error("Не удалось открыть связь с таймером.");
       await writeFile(this.path + ".tmp", JSON.stringify({port:address.port,token:this.token}), {mode:0o600}); await rename(this.path + ".tmp",this.path);

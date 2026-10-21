@@ -3,6 +3,11 @@ import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { dataDir } from "./config";
 import { pythonPath } from "./runtime";
+function terminateSetup(child?: ChildProcessWithoutNullStreams): void {
+  if (!child?.pid) return;
+  if (process.platform === "win32") execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
+  else { try { process.kill(-child.pid, "SIGTERM"); } catch {} }
+}
 export class LocalSetup {
   running = false;
   status = "";
@@ -10,7 +15,7 @@ export class LocalSetup {
   start(python: string, complete: (python: string, model: string) => Promise<void>): void {
     if (this.running) throw new Error("Подготовка Vosk уже выполняется.");
     this.running = true; this.status = "Подготовка локального распознавания…";
-    const child = spawn(pythonPath(python), ["-u", join(__dirname, "assets", "setup_vosk.py"), dataDir], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    const child = spawn(pythonPath(python), ["-u", join(__dirname, "assets", "setup_vosk.py"), dataDir], { detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     this.child = child; child.stdin.end(); child.stderr.resume();
     let result: { python: string; model: string } | undefined;
     const timeout = setTimeout(() => { this.status = "Подготовка не завершилась за 10 минут. Повторите попытку."; this.stop(); }, 600_000);
@@ -29,7 +34,7 @@ export class LocalSetup {
   }
   stop(): void {
     const child = this.child; this.child = undefined; this.running = false;
-    if (child?.pid) execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
+    terminateSetup(child);
   }
 }
 
@@ -40,7 +45,7 @@ export class WhisperSetup {
   start(python: string, complete: (python: string) => Promise<void>): void {
     if (this.running) throw new Error("Подготовка Whisper уже выполняется.");
     this.running = true; this.status = "Подготовка Whisper…";
-    const child = spawn(pythonPath(python), ["-u", join(__dirname, "assets", "setup_whisper.py"), dataDir], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    const child = spawn(pythonPath(python), ["-u", join(__dirname, "assets", "setup_whisper.py"), dataDir], { detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     this.child = child; child.stdin.end(); child.stderr.resume();
     let prepared = "";
     const timer = setTimeout(() => { this.stop(); this.status = "Подготовка Whisper не завершилась за 10 минут. Повторите попытку."; }, 600_000);
@@ -59,7 +64,7 @@ export class WhisperSetup {
   }
   stop(): void {
     const child = this.child; this.child = undefined; this.running = false;
-    if (child?.pid) execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
+    terminateSetup(child);
   }
 }
 
@@ -70,7 +75,7 @@ export class SupertonicSetup {
   start(complete: (python: string) => Promise<void>): void {
     if (this.running) throw new Error("Подготовка Supertonic уже выполняется.");
     this.running = true; this.status = "Подготовка голоса Supertonic…";
-    const child = spawn(pythonPath(), ["-u", join(__dirname, "assets", "setup_supertonic.py"), dataDir], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    const child = spawn(pythonPath(), ["-u", join(__dirname, "assets", "setup_supertonic.py"), dataDir], { detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     this.child = child; child.stdin.end(); child.stderr.resume(); let prepared = "";
     const timer = setTimeout(() => { this.stop(); this.status = "Подготовка Supertonic не завершилась за 10 минут. Повторите попытку."; }, 600000);
     createInterface({ input: child.stdout }).on("line", line => {
@@ -83,5 +88,5 @@ export class SupertonicSetup {
       else { this.running = false; if (!this.status.startsWith("Не удалось")) this.status = "Не удалось подготовить Supertonic. Проверьте Python и доступ к PyPI."; }
     });
   }
-  stop(): void { const child = this.child; this.child = undefined; this.running = false; if (child?.pid) execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {}); }
+  stop(): void { const child = this.child; this.child = undefined; this.running = false; terminateSetup(child); }
 }

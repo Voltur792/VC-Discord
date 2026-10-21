@@ -2,9 +2,15 @@ import { mkdir, readFile, writeFile, rename, access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { runWindows } from "./process";
+import { networkErrorCode, networkErrorMessage } from "./network-error";
+import { dataDir } from "./platform";
+export { dataDir } from "./platform";
 
 export interface Settings {
   botToken: string; guildId: string; channelId: string;
+  textEnabled: boolean; textChannelId: string; textMusicEnabled: boolean; textChatEnabled: boolean; textSummonEnabled: boolean;
+  textChatMode: "context" | "all"; textContextSeconds: number; textMusicService: "yandex" | "vk" | "spotify";
+  publicVoiceLeaveEnabled: boolean; publicVoiceAutoLeaveEnabled: boolean; publicVoiceEmptySeconds: number;
   allowedUserIds: string[]; commandsEnabled: boolean; confirmCommands: boolean;
   commandPhrase: string; wakeWord: string; addressMode: "all" | "name";
   bargeIn: boolean; silenceMs: number; maxUtteranceSecs: number;
@@ -21,11 +27,15 @@ export interface Settings {
   fishApiKey: string; fishModel: string; fishVoice: string;
   musicVolume: number; musicFFmpeg: string;
   radioEnabled: boolean; radioEvery: number; radioWhen: "start" | "end"; radioNext: boolean; radioScheduleEnabled: boolean; radioSkipEmpty: boolean;
+  radioScheduleTakeover: boolean; radioScheduleAnnounce: boolean;
   moderationEnabled: boolean; confirmModeration: boolean; moderatorUserIds: string[];
   moderationUserAliases: string; moderationChannelAliases: string;
 }
 export const defaults: Settings = {
   botToken: "", guildId: "", channelId: "", allowedUserIds: [], commandsEnabled: false,
+  textEnabled: false, textChannelId: "", textMusicEnabled: false, textChatEnabled: false, textSummonEnabled: false,
+  textChatMode: "context", textContextSeconds: 180, textMusicService: "yandex",
+  publicVoiceLeaveEnabled: true, publicVoiceAutoLeaveEnabled: true, publicVoiceEmptySeconds: 120,
   confirmCommands: true, commandPhrase: "Астра выполни", wakeWord: "Астра", addressMode: "all",
   bargeIn: true, silenceMs: 800, maxUtteranceSecs: 20,
   llmBaseUrl: "http://127.0.0.1:1234/v1", llmApiKey: "", llmModel: "", llmUseAstra: false, llmProviderId: "manual", llmProviderKeys: {}, llmKeyOrigin: "",
@@ -41,11 +51,11 @@ export const defaults: Settings = {
   fishApiKey: "", fishModel: "s2.1-pro-free", fishVoice: "",
   musicVolume: 50, musicFFmpeg: "",
   radioEnabled: false, radioEvery: 3, radioWhen: "end", radioNext: true, radioScheduleEnabled: false, radioSkipEmpty: true,
+  radioScheduleTakeover: true, radioScheduleAnnounce: true,
   moderationEnabled: false, confirmModeration: true, moderatorUserIds: [], moderationUserAliases: "", moderationChannelAliases: "",
 };
 const secrets = ["botToken", "llmApiKey", "sttApiKey", "ttsApiKey", "fishApiKey", "googleApiKey"] as const;
 export const fishModels = ["s2.1-pro-free", "s2.1-pro", "s2-pro", "s1", "drama-3-preview"] as const;
-export const dataDir = process.env.DVOICE_DATA_DIR || join(process.env.APPDATA || join(homedir(), ".config"), "discord-voice-bridge");
 export function ids(value: unknown): string[] {
   const list = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\s,;]+/) : [];
   return [...new Set(list.map(String).map(x => x.trim()).filter(Boolean))];
@@ -73,6 +83,10 @@ export function normalizeSettings(value: unknown, base: Settings = defaults): Se
     if (!result.screenCloudConfirmed || result.screenCloudOrigin !== new URL(result.llmBaseUrl).origin) { result.screenCloudConfirmed = false; result.screenCloudOrigin = ""; }
   } catch { result.screenCloudConfirmed = false; result.screenCloudOrigin = ""; }
   result.addressMode = result.addressMode === "name" ? "name" : "all";
+  result.textChatMode = result.textChatMode === "all" ? "all" : "context";
+  result.textMusicService = ["vk", "spotify"].includes(result.textMusicService) ? result.textMusicService : "yandex";
+  result.textContextSeconds = Math.max(30, Math.min(900, Math.round(result.textContextSeconds)));
+  result.publicVoiceEmptySeconds = Math.max(30, Math.min(1800, Math.round(result.publicVoiceEmptySeconds)));
   result.silenceMs = Math.max(350, Math.min(2000, result.silenceMs));
   result.maxUtteranceSecs = Math.max(5, Math.min(30, result.maxUtteranceSecs));
   result.windowsRate = Math.max(-5, Math.min(5, Math.round(result.windowsRate)));
@@ -84,7 +98,7 @@ export function normalizeSettings(value: unknown, base: Settings = defaults): Se
 }
 export function validateSettings(s: Settings): void {
   if (s.sttEngine === "google" && !s.googleSpeechConfirmed) throw new Error("Подтвердите отправку речи участников в Google во вкладке «Голос и модель».");
-  for (const id of [s.guildId, s.channelId, ...s.allowedUserIds, ...s.moderatorUserIds].filter(Boolean)) {
+  for (const id of [s.guildId, s.channelId, s.textChannelId, ...s.allowedUserIds, ...s.moderatorUserIds].filter(Boolean)) {
     if (!/^\d{17,20}$/.test(id)) throw new Error("Discord ID должен содержать от 17 до 20 цифр. Укажите ID, а не ник.");
   }
   if (!s.commandPhrase || s.commandPhrase.length < 4) throw new Error("Укажите фразу для команд ПК, например «Астра выполни».");
@@ -100,6 +114,14 @@ export function validateSettings(s: Settings): void {
   if (s.ttsEngine === "fish" && !(fishModels as readonly string[]).includes(s.fishModel)) throw new Error("Выберите поддерживаемую модель Fish Audio из списка. Неизвестное имя может переключить сервис на платную модель.");
   if (/[\r\n\0]/.test(s.fishApiKey)) throw new Error("Ключ Fish Audio должен быть одной строкой.");
   for (const url of [s.llmBaseUrl, s.sttBaseUrl, s.ttsBaseUrl]) apiUrl(url, "");
+}
+/** Draft settings may be saved before discovery has supplied all channel IDs. */
+export function textSetupIssue(s: Settings): string {
+  const missing: string[] = [];
+  if (!s.botToken) missing.push("токен бота");
+  if (!s.guildId) missing.push("ID сервера");
+  if (!s.textChannelId) missing.push("ID текстового канала");
+  return missing.length ? "Текстовый канал пока не подключён. Укажите: " + missing.join(", ") + ". Затем сохраните настройки." : "";
 }
 export function apiUrl(base: string, suffix: string): string {
   let parsed: URL;
@@ -197,6 +219,8 @@ export class SettingsStore {
 }
 export function safeError(error: unknown, s?: Settings): string {
   let message = error instanceof Error ? error.message : "Не удалось выполнить запрос.";
+  const network = networkErrorCode(error);
+  if (network && !/[а-яё]/iu.test(message)) message = networkErrorMessage(network);
   for (const key of secrets) if (s?.[key]) message = message.split(s[key]).join("[скрыто]");
   for (const key of Object.values(s?.llmProviderKeys || {})) if (key) message = message.split(key).join("[скрыто]");
   return message.replace(/Bearer\s+\S+/gi, "Bearer [скрыто]").slice(0, 320);

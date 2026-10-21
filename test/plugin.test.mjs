@@ -121,6 +121,14 @@ test('Windows protects saved keys and reload decrypts them',{skip:process.platfo
  assert.equal((await store.save({botToken:'',llmApiKey:''})).botToken,fresh.botToken);
  assert.equal((await store.save({clear_botToken:true})).botToken,'');
 });
+test('saving a text draft preserves encrypted token, existing voice IDs and allowlist',{skip:process.platform!=='win32'},async()=>{
+ const store=new core.SettingsStore();await store.save({botToken:'private-dummy-token',guildId:'111111111111111111',channelId:'222222222222222222',allowedUserIds:[owner]});
+ const saved=await store.save({botToken:'',textEnabled:true,textChannelId:''});
+ assert.equal(saved.botToken,'private-dummy-token');assert.equal(saved.guildId,'111111111111111111');assert.equal(saved.channelId,'222222222222222222');assert.deepEqual(saved.allowedUserIds,[owner]);
+ const loaded=await new core.SettingsStore().load();assert.equal(loaded.botToken,saved.botToken);assert.equal(loaded.guildId,saved.guildId);assert.equal(loaded.channelId,saved.channelId);assert.equal(loaded.textEnabled,true);
+ assert.ok(!readFileSync(join(temporary,'settings.json'),'utf8').includes('private-dummy-token'));
+ await store.save({textEnabled:false});
+});
 test('Windows speech produces Discord-ready audio without local playback',{skip:process.platform!=='win32'},async()=>{
  const providers=new core.Providers();assert.ok((await providers.voices()).length>0);
  const pcm=await providers.speak(core.defaults,'Проверка голоса',new AbortController().signal);assert.ok(pcm.length>48000);assert.equal(pcm.length%4,0);
@@ -154,9 +162,9 @@ test('radio metadata is bounded and isolated from instructions',()=>{
 test('radio speech uses selected Astra personality and Discord-only TTS without privileged tools',async t=>{
  const requests=[];const server=createServer((req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{requests.push(JSON.parse(body));res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'В эфире Astra! Сейчас Song.'}}]}));});});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>server.close());
- const fs=await import('node:fs/promises');const prior=process.env.APPDATA;
+ const fs=await import('node:fs/promises');const prior=process.env.APPDATA, priorConfig=process.env.ASTRA_CONFIG_DIR;
  const fakeAppdata=join(temporary,'radio-profile');await fs.mkdir(join(fakeAppdata,'astra','astra','config'),{recursive:true});await fs.writeFile(join(fakeAppdata,'astra','astra','config','settings.json'),JSON.stringify({ai:{system_prompt:'Личность: Astra, энергичная и остроумная ведущая.'}}));
- process.env.APPDATA=fakeAppdata;
+ process.env.APPDATA=fakeAppdata;process.env.ASTRA_CONFIG_DIR=join(fakeAppdata,"astra","astra","config");
  try{
   const bridge=new core.VoiceBridge();bridge.settings=core.normalizeSettings({radioEnabled:true,llmModel:'local',llmBaseUrl:`http://127.0.0.1:${server.address().port}/v1`});
   let audience=1;
@@ -166,7 +174,7 @@ test('radio speech uses selected Astra personality and Discord-only TTS without 
   audience=0;await bridge.announceRadio({key:'empty',title:'Empty',artist:'',playing:true},new AbortController().signal);assert.equal(requests.length,1,'empty channel must not call model');assert.equal(speech.length,1);
   bridge.settings.radioSkipEmpty=false;await bridge.announceRadio({key:'enabled',title:'Enabled',artist:'',playing:true},new AbortController().signal);assert.equal(requests.length,2,'user can allow introductions without listeners');
   bridge.processing=true;await bridge.announceRadio({key:'other',title:'Other',artist:'',playing:true},new AbortController().signal);assert.equal(requests.length,2,'conversation has priority');
- }finally{if(prior===undefined)delete process.env.APPDATA;else process.env.APPDATA=prior;}
+ }finally{if(prior===undefined)delete process.env.APPDATA;else process.env.APPDATA=prior;if(priorConfig===undefined)delete process.env.ASTRA_CONFIG_DIR;else process.env.ASTRA_CONFIG_DIR=priorConfig;}
 });
 
 test('radio request is cancelled when the last listener leaves during generation',async t=>{

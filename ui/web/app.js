@@ -47,6 +47,10 @@ async function backend(method, params = {}) {
   const timeout = method === "state" ? 5000 : method === "start_screen" ? 35000 : method === "use_astra_voice" ? 150000 : ["connect", "use_astra_recognition"].includes(method) ? 110000 : ["models", "test_voice", "find_voice_runtime", "discover_discord", "music_play", "music_search"].includes(method) ? 100000 : 15000;
   let result;
   try { result = await Promise.race([window.astra.callBackend(method, params), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Astra не ответила на «" + method + "». Перезапустите плагин. Отправленное действие могло продолжить выполняться.")), timeout); })]); }
+  catch (error) {
+    if (/other side closed|fetch failed|socket hang up|ECONNRESET|UND_ERR_SOCKET/i.test(error?.message || "")) throw new Error("Связь вкладки с Astra прервалась. Повторите действие немного позже. Если ошибка повторяется, откройте вкладку заново.");
+    throw error;
+  }
   finally { clearTimeout(timer); }
   for (const key of ["resultJson", "result_json"]) if (typeof result?.[key] === "string") { result = result[key]; break; }
   if (typeof result === "string") { try { result = JSON.parse(result); } catch { throw new Error("Плагин вернул неподдерживаемый ответ."); } }
@@ -155,7 +159,7 @@ async function action(button, operation) {
 function render(state) {
   snapshot = state;
   const shift = state.radioShift?.active;
-  $("radioShiftStatus").textContent = shift ? (shift.phase === "starting" ? "Подключение к эфиру: " : "В эфире: ") + shift.name + " · до " + new Date(shift.ends_at * 1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : state.radioShift?.message || "";
+  $("radioShiftStatus").textContent = shift ? (shift.phase === "starting" ? "Подключение к эфиру: " : shift.phase === "recovering" ? "Восстановление эфира: " : "В эфире: ") + shift.name + " · до " + new Date(shift.ends_at * 1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : state.radioShift?.message || "";
   renderDiagnostics(state.diagnostics, state);
   if (!dirty && !document.activeElement?.closest("#settingsForm")) fill(state.settings);
   $("connectionBadge").textContent = labels[state.phase] || "Отключён";
@@ -163,6 +167,9 @@ function render(state) {
   $("channelTitle").textContent = state.channelName ? "# " + state.channelName : "Выберите голосовой канал";
   $("status").textContent = state.status;
   $("connect").textContent = state.connected ? "Выйти из канала" : "Войти в канал";
+  $("textStatus").textContent = (state.text?.status || "Текстовый канал выключен") + (state.text?.messages ? " · в памяти сообщений: " + state.text.messages : "");
+  $("restartText").disabled = busy || !state.settings?.textEnabled;
+  $("clearTextHistory").disabled = busy || !state.settings?.textChannelId;
   $("connect").disabled = busy || state.phase === "connecting";
   $("stop").disabled = !state.connected;
   $("testVoice").disabled = busy || !state.connected;
@@ -320,6 +327,8 @@ $("settingsForm").onsubmit = event => { event.preventDefault(); void action($("s
 $("connect").onclick = () => action($("connect"), async () => { if (snapshot?.connected) await backend("disconnect"); else { if (dirty) await save(); await backend("connect"); } });
 $("stop").onclick = () => action($("stop"), () => backend("stop"));
 $("clearHistory").onclick = () => action($("clearHistory"), () => backend("clear_history"));
+$("restartText").onclick = () => action($("restartText"), async () => { if (dirty) await save(); await backend("restart_text"); });
+$("clearTextHistory").onclick = () => action($("clearTextHistory"), async () => { await backend("clear_text_history"); notice("Память текстового Discord-чата очищена."); });
 $("approve").onclick = () => action($("approve"), () => backend("approve", { id: snapshot.pending?.id }));
 $("reject").onclick = () => action($("reject"), () => backend("reject", { id: snapshot.pending?.id }));
 $("testVoice").onclick = () => action($("testVoice"), async () => { if (dirty) await save(); await backend("test_voice"); });
@@ -436,7 +445,7 @@ $("discoverDiscord").onclick = () => action($("discoverDiscord"), async () => {
   if (dirty) await save();
   const result = await backend("discover_discord"); fill(result.settings); dirty = false;
   $("discordDiscovery").hidden = false; $("discordInvite").value = result.inviteUrl;
-  for (const [target, field, values] of [["discordGuilds", "guildId", result.guilds], ["discordChannels", "channelId", result.channels]]) {
+  for (const [target, field, values] of [["discordGuilds", "guildId", result.guilds], ["discordChannels", "channelId", result.channels], ["discordTextChannels", "textChannelId", result.textChannels || []]]) {
     $(target).replaceChildren();
     for (const item of values) { const button = document.createElement("button"); button.type = "button"; button.textContent = item.name; button.onclick = () => { $(field).value = item.id; markDirty(); notice(field === "guildId" ? "Сервер выбран. Повторите поиск, чтобы получить его каналы." : "Канал выбран. Сохраните настройки и войдите в канал."); }; $(target).append(button); }
   }

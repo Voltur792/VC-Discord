@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { apiUrl, type Settings } from "./config";
+import { openCommand } from "./platform";
 
 export function visionBase(s: Pick<Settings, "llmBaseUrl" | "screenCloudConfirmed" | "screenCloudOrigin">): string {
   const url = new URL(apiUrl(s.llmBaseUrl, ""));
@@ -17,7 +18,8 @@ export function openScreenPicker(url: string): Promise<boolean> {
   const parsed = new URL(url);
   if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || parsed.pathname !== "/") return Promise.resolve(false);
   return new Promise(resolve => {
-    const child = spawn("explorer.exe", [url], { windowsHide: true, stdio: "ignore" });
+    const [command, args] = openCommand(url);
+    const child = spawn(command, args, { windowsHide: true, stdio: "ignore" });
     child.once("error", () => resolve(false));
     child.once("spawn", () => { child.unref(); resolve(true); });
   });

@@ -1,11 +1,12 @@
+import { astraConfig, astraData } from "./platform";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { apiUrl, llmKeyScope, modelKey, type Settings } from "./config";
 
-const root = () => join(process.env.APPDATA || "", "astra", "astra");
+const root = () => astraConfig();
 async function astraSettings(): Promise<any> {
-  try { return JSON.parse(await readFile(join(root(), "config", "settings.json"), "utf8")); }
-  catch { throw new Error("Не удалось прочитать настройки Astra. Откройте Astra под этим Windows-аккаунтом."); }
+  try { return JSON.parse(await readFile(join(root(), "settings.json"), "utf8")); }
+  catch { throw new Error("Не удалось прочитать настройки Astra. Откройте Astra под этим аккаунтом."); }
 }
 export async function astraPersonality(s: Settings): Promise<string> {
   if (!s.llmUseAstraPersonality) return "";
@@ -33,7 +34,7 @@ export async function astraRecognition(allowGoogle = false): Promise<Partial<Set
   if (!/^(tiny|base|small|medium|large(?:-v[123])?|large-v3-turbo)(?:\.en)?$/.test(name)) {
     throw new Error("Выбранная модель распознавания Astra пока не поддерживается. Выберите модель Whisper.");
   }
-  const folder = join(root(), "data", "models", "whisper");
+  const folder = join(astraData(), "models", "whisper");
   // Prefer the smaller quantized copy of the same selected model. Never download
   // a model implicitly or substitute a different model when files are missing.
   for (const suffix of ["-q5_0", "-q8_0", ""]) {
