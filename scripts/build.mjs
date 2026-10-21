@@ -53,7 +53,7 @@ if (process.argv.includes("--test")) {
   await cp("dist/assets", "test/artifact/assets", { recursive: true });
   await build({ ...options, external: ["astra-plugin-sdk"], outfile: "test/artifact/plugin.cjs" });
 }
-await writeFile("dist/BUILD.txt", "Windows/Linux x64; macOS and ARM runtime adapters prepared; Node.js >= 22.12; all JavaScript and DAVE platform modules bundled.\n");
+await writeFile("dist/BUILD.txt", "Windows/Linux x64 (glibc); macOS runtime adapters prepared; Linux musl/ARM unsupported; Node.js >= 22.12; JavaScript and supported DAVE platform modules bundled.\n");
 const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
 for (const [folder, info] of Object.entries(lock.packages)) {
   if (!folder.startsWith("node_modules/")) continue;

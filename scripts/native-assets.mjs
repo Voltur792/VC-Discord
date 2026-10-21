@@ -1,12 +1,14 @@
 // One noarch bundle contains separate pinned N-API modules. A Linux/macOS
 // runtime never attempts to load a Windows DLL. Downloads are build-time only.
-import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-export const targets = ['win32-x64-msvc','win32-arm64-msvc','linux-x64-gnu','linux-x64-musl','linux-arm64-gnu','linux-arm64-musl','darwin-x64','darwin-arm64'];
+// Astra's Linux host targets x64; this release supports glibc distributions.
+// musl and Linux ARM are outside the declared platform support of this bundle.
+export const targets = ['win32-x64-msvc','win32-arm64-msvc','linux-x64-gnu','darwin-x64','darwin-arm64'];
 
 export function extractNative(archive) {
   const tar = gunzipSync(archive, {maxOutputLength: 64 * 1024 * 1024});
@@ -26,6 +28,9 @@ export async function prepareNative() {
   const cache='node_modules/.cache/astra-davey';
   await mkdir(cache,{recursive:true});
   await mkdir('dist/native/davey',{recursive:true});
+  for (const retired of ['linux-x64-musl','linux-arm64-gnu','linux-arm64-musl']) {
+    await rm(join('dist/native/davey',retired+'.node'),{force:true});
+  }
   for(const target of targets) {
     const name='@snazzah/davey-'+target,info=lock.packages['node_modules/'+name];
     if(!info || info.version!=='0.1.12'||!info.integrity?.startsWith('sha512-')||!info.resolved?.startsWith('https://registry.npmjs.org/')) throw new Error('Missing pinned DAVE package '+name);

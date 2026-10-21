@@ -19,7 +19,7 @@ test('user data uses the OS profile and ignores relative XDG paths',()=>{
 });
 
 test('each native platform has a real executable of the correct format',()=>{
-  const targets=['win32-x64-msvc','win32-arm64-msvc','linux-x64-gnu','linux-x64-musl','linux-arm64-gnu','linux-arm64-musl','darwin-x64','darwin-arm64'];
+  const targets=['win32-x64-msvc','win32-arm64-msvc','linux-x64-gnu','darwin-x64','darwin-arm64'];
   for(const target of targets){
     const file=readFileSync(join(project,'dist','native','davey',target+'.node'));
     assert.ok(file.length>100_000,target);
