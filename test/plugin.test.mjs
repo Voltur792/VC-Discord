@@ -131,7 +131,7 @@ test('saving a text draft preserves encrypted token, existing voice IDs and allo
 });
 test('Windows speech produces Discord-ready audio without local playback',{skip:process.platform!=='win32'},async()=>{
  const providers=new core.Providers();assert.ok((await providers.voices()).length>0);
- const pcm=await providers.speak(core.defaults,'Проверка голоса',new AbortController().signal);assert.ok(pcm.length>48000);assert.equal(pcm.length%4,0);
+ const pcm=await providers.speak(core.defaults,'Voice check',new AbortController().signal);assert.ok(pcm.length>48000);assert.equal(pcm.length%4,0);
 });
 
 test('radio is opt-in, counts confirmed song starts and does not repeat on pause or polling', async()=>{
@@ -184,7 +184,7 @@ test('radio request is cancelled when the last listener leaves during generation
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  t.after(()=>{server.closeAllConnections();server.close();});
  const bridge=new core.VoiceBridge();
- bridge.settings=core.normalizeSettings({radioEnabled:true,radioSkipEmpty:true,llmUseAstra:false,llmModel:'local',llmBaseUrl:`http://127.0.0.1:${server.address().port}/v1`});
+ bridge.settings=core.normalizeSettings({radioEnabled:true,radioSkipEmpty:true,llmUseAstra:false,llmUseAstraPersonality:false,llmModel:'local',llmBaseUrl:`http://127.0.0.1:${server.address().port}/v1`});
  bridge.transport={connected:true,participants:()=>audience?[{id:'listener'}]:[],play:async()=>{}};
  bridge.providers={speak:async()=>{spoken++;return Buffer.alloc(3840);}};
  const pending=bridge.announceRadio({key:'song',title:'Song',artist:'Artist',playing:true},new AbortController().signal);

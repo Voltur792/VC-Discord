@@ -55,7 +55,7 @@ test('a dropped Astra UI bridge connection is localized without automatically re
 test('a broken text model response yields one localized error, and a successful response clears its stale UI banner',async t=>{
   const bridge=new core.VoiceBridge();bridge.diagnostics.stop();
   const guild='111111111111111111',channel='222222222222222222';
-  bridge.settings=core.normalizeSettings({guildId:guild,textChannelId:channel,textEnabled:true,textChatEnabled:true,llmUseAstra:false,llmModel:'test-model',llmBaseUrl:'http://127.0.0.1:1234/v1'});
+  bridge.settings=core.normalizeSettings({guildId:guild,textChannelId:channel,textEnabled:true,textChatEnabled:true,llmUseAstra:false,llmUseAstraPersonality:false,llmModel:'test-model',llmBaseUrl:'http://127.0.0.1:1234/v1'});
   let requests=0;const original=globalThis.fetch,logged=[],replies=[];
   bridge.ctx={log:async(_level,message)=>logged.push(message)};
   globalThis.fetch=async()=>++requests===1?brokenResponse():new Response(JSON.stringify({choices:[{message:{content:'Привет!'}}]}));
