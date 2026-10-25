@@ -316,7 +316,7 @@ export class DiscordMusic {
     else if (phrase.includes("плейлист ")) {
       const wanted = phrase.split("плейлист ")[1];
       const data = await this.playlists({ service: this.service });
-      const list = (data.playlists || []).filter((p: any) => String(p.title || "").toLocaleLowerCase("ru").replace(/ё/g, "е").trim() === wanted);
+      const list = (data.playlists || []).filter((p: any) => String(p.title || "").toLocaleLowerCase("ru").replace(/ё/g, "е").replace(/[.,!?;:]/g, " ").replace(/\s+/g, " ").trim() === wanted);
       if (list.length !== 1) return list.length ? "Есть несколько таких плейлистов. Выберите нужный во вкладке плагина." : "Плейлист с таким названием не найден.";
       input = { mode: "playlist", service: this.service, playlist_id: list[0].playlist_id };
     } else {

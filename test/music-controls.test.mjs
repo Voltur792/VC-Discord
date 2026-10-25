@@ -80,3 +80,12 @@ test('a failed music bridge never yields a success acknowledgement',async t=>{
   await assert.rejects(p.music.control('previous',()=>true,new AbortController().signal),/Нет ответа/);await p.stopRequested;
   assert.equal(p.music.state().following,false);
 });
+
+test('a spoken Spotify playlist is looked up in Spotify and matched despite punctuation',async t=>{
+  const p=player(t,input=>input.method==='discord_playlists'?{playlists:[{playlist_id:'other',title:'Другой'},{playlist_id:'p1',title:'Chill, vibes'}]}:{error:'stop'});
+  p.music.service='yandex';
+  await p.music.voice('Включи плейлист chill vibes в спотифай',()=>true,new AbortController().signal).catch(()=>{});
+  assert.deepEqual(p.calls.find(c=>c.method==='discord_playlists').params,{service:'spotify'});
+  const play=p.calls.find(c=>c.method==='discord_play');
+  assert.equal(play.params.service,'spotify');assert.equal(play.params.playlist_id,'p1');assert.equal(play.params.mode,'playlist');
+});
