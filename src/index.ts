@@ -77,7 +77,7 @@ export { defaults, normalizeSettings, publicSettings, validateSettings, textSetu
 export { wav, fromWav, resample, rms, opusStream, OpusScript } from "./audio";
 export { publicChat, Providers, limitedBody } from "./providers";
 export { networkErrorCode } from "./network-error";
-export { DiscordMusic } from "./music";
+export { DiscordMusic, isHlsInput } from "./music";
 export { RadioShiftSession, validateRadioShift } from "./radio-shift";
 export { TimerIntegration } from "./timer-integration";
 export { RadioPresenter, radioPrompt } from "./radio";

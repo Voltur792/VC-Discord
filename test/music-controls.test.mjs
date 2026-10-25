@@ -89,3 +89,11 @@ test('a spoken Spotify playlist is looked up in Spotify and matched despite punc
   const play=p.calls.find(c=>c.method==='discord_play');
   assert.equal(play.params.service,'spotify');assert.equal(play.params.playlist_id,'p1');assert.equal(play.params.mode,'playlist');
 });
+
+test('HLS demuxer options are used only for HLS input, with the old VK behaviour as fallback',()=>{
+  assert.equal(core.isHlsInput({service:'vk',stream_format:'file'}),false);
+  assert.equal(core.isHlsInput({service:'vk',stream_format:'hls'}),true);
+  assert.equal(core.isHlsInput({service:'yandex',stream_format:'file'}),false);
+  assert.equal(core.isHlsInput({service:'vk'}),true);
+  assert.equal(core.isHlsInput({service:'yandex'}),false);
+});

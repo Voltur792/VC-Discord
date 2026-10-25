@@ -12,6 +12,10 @@ import { RadioPresenter, type RadioTrack } from "./radio";
 
 export type MusicControl = "pause" | "resume" | "stop" | "next" | "previous" | "current";
 
+export function isHlsInput(track: { service?: unknown; stream_format?: unknown }): boolean {
+  return track.stream_format ? track.stream_format === "hls" : track.service === "vk";
+}
+
 async function musicCall(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<any> {
   let location: { port: number; token: string };
   try {
@@ -373,7 +377,9 @@ export class DiscordMusic {
         this.stopDecoder(); this.revision = track.revision;
         // FFmpeg can read HLS playlists, segments and AES keys only via our
         // loopback proxy. It receives no service cookies or signed CDN URLs.
-        const hlsOptions = track.service === "vk" ? await this.decoderHlsOptions(executable) : [];
+        // VK now also serves plain .mp3, whose demuxer rejects HLS options; older
+        // Astra Music builds send no stream_format and only HLS for VK.
+        const hlsOptions = isHlsInput(track) ? await this.decoderHlsOptions(executable) : [];
         if (epoch !== this.epoch) return;
         const resumeAt = this.resumeSeconds;
         const pcmInput = track.service === 'spotify' && track.codec === 'pcm_s16le';
